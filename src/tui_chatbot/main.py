@@ -1,6 +1,11 @@
 """
 Minimal TUI Chatbot with streaming output and TPS statistics.
-Simple shell-like interface.
+Compatible with various OpenAI-compatible API endpoints.
+
+Architecture:
+    - ContentExtractor protocol for API-specific text extraction
+    - Simple adapter pattern for different response formats
+    - Modern Python: type hints, dataclasses, protocols
 """
 
 import os
@@ -8,14 +13,13 @@ import sys
 import time
 import argparse
 import asyncio
-import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Protocol, Callable, Any
 from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-# Load environment variables
 load_dotenv()
 
 
@@ -42,20 +46,130 @@ class StreamStats:
 
     @property
     def tps(self) -> float:
-        elapsed = self.elapsed
-        return self.tokens / elapsed if elapsed > 0 else 0.0
+        return self.tokens / self.elapsed if self.elapsed > 0 else 0.0
+
+    def __str__(self) -> str:
+        return (
+            f"[Stats: {self.tokens} tokens, {self.elapsed:.2f}s, {self.tps:.2f} tok/s]"
+        )
+
+
+class ContentExtractor(Protocol):
+    """Protocol for extracting text content from streaming chunks.
+
+    Different API endpoints may return content in different fields:
+    - Standard OpenAI: delta.content
+    - Doubao/Seed: delta.reasoning_content
+    - Others: may have different structures
+    """
+
+    def extract(self, chunk: Any) -> Optional[str]:
+        """Extract text content from a chunk. Return None if no content."""
+        ...
+
+
+# Built-in extractors
+
+
+class StandardContentExtractor:
+    """Standard OpenAI API: content in delta.content field."""
+
+    def extract(self, chunk: Any) -> Optional[str]:
+        if not chunk.choices:
+            return None
+
+        delta = chunk.choices[0].delta
+        if not delta:
+            return None
+
+        content = getattr(delta, "content", None)
+        return content if content else None
+
+
+class ReasoningContentExtractor:
+    """Doubao/Seed models: content in delta.reasoning_content field."""
+
+    def extract(self, chunk: Any) -> Optional[str]:
+        if not chunk.choices:
+            return None
+
+        delta = chunk.choices[0].delta
+        if not delta:
+            return None
+
+        # Try reasoning_content first (for reasoning models)
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning:
+            return reasoning
+
+        # Fallback to standard content field
+        content = getattr(delta, "content", None)
+        return content if content else None
+
+
+class CompositeExtractor:
+    """Try multiple extractors in order."""
+
+    def __init__(self, extractors: List[ContentExtractor]):
+        self.extractors = extractors
+
+    def extract(self, chunk: Any) -> Optional[str]:
+        for extractor in self.extractors:
+            content = extractor.extract(chunk)
+            if content:
+                return content
+        return None
+
+
+# Registry of known API patterns
+EXTRACTOR_REGISTRY: Dict[str, ContentExtractor] = {
+    "default": StandardContentExtractor(),
+    "openai": StandardContentExtractor(),
+    "doubao": ReasoningContentExtractor(),
+    "seed": ReasoningContentExtractor(),
+    "ark": ReasoningContentExtractor(),  # ByteDance Ark platform
+}
+
+
+def get_extractor(base_url: str, model: str) -> ContentExtractor:
+    """Get appropriate extractor based on URL and model hints.
+
+    Args:
+        base_url: API base URL for pattern matching
+        model: Model name for pattern matching
+
+    Returns:
+        ContentExtractor instance for the detected API type
+    """
+    url_lower = base_url.lower()
+    model_lower = model.lower()
+
+    # Check URL patterns
+    if any(host in url_lower for host in ["volces", "ark", "doubao", "seed"]):
+        return ReasoningContentExtractor()
+
+    # Check model name patterns
+    if any(name in model_lower for name in ["doubao", "seed"]):
+        return ReasoningContentExtractor()
+
+    return StandardContentExtractor()
 
 
 class ChatBot:
-    """Minimal shell-like chatbot."""
+    """Minimal shell-like chatbot with pluggable content extraction."""
 
-    def __init__(self, config: ChatConfig):
+    def __init__(
+        self, config: ChatConfig, extractor: Optional[ContentExtractor] = None
+    ):
         self.config = config
         self.client: Optional[AsyncOpenAI] = None
         self.messages: List[Dict[str, str]] = [
             {"role": "system", "content": "You are a helpful assistant."}
         ]
         self.current_model = config.model
+
+        # Auto-detect or use provided extractor
+        self.extractor = extractor or get_extractor(config.base_url, config.model)
 
         if config.api_key:
             self.client = AsyncOpenAI(
@@ -68,12 +182,13 @@ class ChatBot:
         if self.config.debug:
             print(f"[DEBUG] {msg}", flush=True)
 
-    def print_banner(self):
+    def print_banner(self) -> None:
         """Print welcome message."""
         print(f"🤖 ChatBot | URL: {self.config.base_url} | Model: {self.current_model}")
         print("Commands: /model, /model <name>, /clear, /help, /quit")
         if self.config.debug:
-            print("[Debug mode ON]")
+            extractor_name = type(self.extractor).__name__
+            print(f"[Debug: extractor={extractor_name}]")
         print()
 
     async def list_models(self) -> None:
@@ -100,17 +215,20 @@ class ChatBot:
             print(f"Error: {e}")
 
     def switch_model(self, model_name: str) -> None:
-        """Switch model."""
+        """Switch model and update extractor if needed."""
         self.current_model = model_name
+        # Re-detect extractor for new model
+        self.extractor = get_extractor(self.config.base_url, model_name)
         print(f"Switched to model: {model_name}")
+        self.log(f"Updated extractor to {type(self.extractor).__name__}")
 
     def clear_history(self) -> None:
-        """Clear history."""
+        """Clear conversation history."""
         self.messages = [{"role": "system", "content": "You are a helpful assistant."}]
         print("History cleared")
 
     def print_help(self) -> None:
-        """Print help."""
+        """Print help message."""
         print("""
 Commands:
   /model          List all available models
@@ -129,6 +247,10 @@ Tips:
             print("Error: Cannot chat without API key.")
             return
 
+        # Keep conversation size manageable
+        if len(self.messages) > 11:
+            self.messages = [self.messages[0]] + self.messages[-10:]
+
         self.messages.append({"role": "user", "content": user_message})
         print(f"\nYou: {user_message}")
 
@@ -137,10 +259,11 @@ Tips:
         has_content = False
         chunk_count = 0
 
-        # Print assistant prefix
         print("Assistant: ", end="", flush=True)
 
         try:
+            self.log(f"Starting stream with {type(self.extractor).__name__}")
+
             stream = await self.client.chat.completions.create(
                 model=self.current_model,
                 messages=self.messages,
@@ -150,38 +273,27 @@ Tips:
             async for chunk in stream:
                 chunk_count += 1
 
-                # Handle different API response formats
-                text_content = ""
+                # Use extractor to get content
+                text = self.extractor.extract(chunk)
 
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta
-                    if delta:
-                        # Try standard content field first
-                        c = getattr(delta, "content", None)
-                        if c:
-                            text_content = c
-                        else:
-                            # Fallback to reasoning_content (for some models like doubao)
-                            r = getattr(delta, "reasoning_content", None)
-                            if r:
-                                text_content = r
-
-                # Print content if not empty
-                if text_content:
+                if text:
                     has_content = True
-                    content += text_content
+                    content += text
                     stats.tokens = len(content) // 4
-                    print(text_content, end="", flush=True)
+                    print(text, end="", flush=True)
 
-            # Finish line
+                # Debug first few chunks
+                if self.config.debug and chunk_count <= 3:
+                    self.log(f"Chunk {chunk_count}: extracted={text is not None}")
+
+            self.log(f"Stream complete: {chunk_count} chunks, {len(content)} chars")
+
             if has_content:
                 print()
             else:
                 print("\n[No content received]")
 
-            print(
-                f"[Stats: {stats.tokens} tokens, {stats.elapsed:.2f}s, {stats.tps:.2f} tok/s]"
-            )
+            print(stats)
 
             if content:
                 self.messages.append({"role": "assistant", "content": content})
@@ -192,6 +304,7 @@ Tips:
                 self.messages.append({"role": "assistant", "content": content})
         except Exception as e:
             print(f"\nError: {e}")
+            self.log(f"Exception: {type(e).__name__}: {e}")
 
     async def handle_command(self, cmd: str) -> bool:
         """Handle commands. Returns False to exit."""
@@ -204,8 +317,7 @@ Tips:
         if c in ("/quit", "/exit"):
             print("Goodbye!")
             return False
-
-        if c == "/help":
+        elif c == "/help":
             self.print_help()
         elif c == "/clear":
             self.clear_history()
@@ -219,8 +331,8 @@ Tips:
 
         return True
 
-    async def run(self):
-        """Main loop."""
+    async def run(self) -> None:
+        """Main chat loop."""
         self.print_banner()
 
         if not self.client:
@@ -228,7 +340,6 @@ Tips:
 
         while True:
             try:
-                # Simple input prompt
                 user_input = input(">>> ").strip()
 
                 if not user_input:
@@ -253,9 +364,9 @@ Tips:
 
 
 def parse_args() -> ChatConfig:
-    """Parse CLI arguments."""
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Minimal TUI Chatbot with TPS stats",
+        description="Minimal TUI Chatbot with API compatibility layer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -263,6 +374,7 @@ Examples:
   %(prog)s --api-key sk-xxx          # Set API key
   %(prog)s --base-url http://localhost:11434/v1 --model llama2
   %(prog)s --model gpt-4
+  %(prog)s --debug                   # Enable debug output
         """,
     )
 
@@ -270,21 +382,18 @@ Examples:
         "--base-url",
         type=str,
         default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        help="API base URL (default: https://api.openai.com/v1 or OPENAI_BASE_URL env var)",
+        help="API base URL (default: https://api.openai.com/v1)",
     )
 
     parser.add_argument(
-        "--api-key",
-        type=str,
-        default=os.getenv("OPENAI_API_KEY", ""),
-        help="API key (default: OPENAI_API_KEY env var)",
+        "--api-key", type=str, default=os.getenv("OPENAI_API_KEY", ""), help="API key"
     )
 
     parser.add_argument(
         "--model",
         type=str,
         default=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
-        help="Model to use (default: gpt-3.5-turbo or OPENAI_MODEL env var)",
+        help="Model to use",
     )
 
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -299,10 +408,19 @@ Examples:
     )
 
 
-def main():
-    """Entry point."""
+def main() -> None:
+    """Entry point with auto-detection of API type."""
     config = parse_args()
-    bot = ChatBot(config)
+
+    # Auto-detect appropriate extractor
+    extractor = get_extractor(config.base_url, config.model)
+
+    if config.debug:
+        print(f"[DEBUG] Using extractor: {type(extractor).__name__}")
+        print(f"[DEBUG] Base URL: {config.base_url}")
+        print(f"[DEBUG] Model: {config.model}")
+
+    bot = ChatBot(config, extractor=extractor)
 
     try:
         asyncio.run(bot.run())
