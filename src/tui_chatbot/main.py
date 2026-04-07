@@ -175,14 +175,14 @@ Tips:
     def _print_reasoning(self, text: str, is_first: bool = False) -> None:
         """Print reasoning content with visual distinction."""
         if is_first:
-            # Start reasoning section
-            print("\n\x1b[90m[思考过程]\x1b[0m ", end="", flush=True)  # Gray prefix
-        print(f"\x1b[90m{text}\x1b[0m", end="", flush=True)  # Gray text
+            # Start reasoning section with gray color
+            print("\n\x1b[90m[Reasoning]\x1b[0m ", end="", flush=True)
+        print(f"\x1b[90m{text}\x1b[0m", end="", flush=True)
 
     def _print_content(self, text: str, is_first: bool = False) -> None:
         """Print final answer content."""
         if is_first:
-            print("\n\x1b[0m[正式回答]\x1b[0m ", end="", flush=True)
+            print("\n\x1b[0m[Assistant]\x1b[0m ", end="", flush=True)
         print(text, end="", flush=True)
 
     def _end_output(self) -> None:
@@ -200,7 +200,6 @@ Tips:
             self.messages = [self.messages[0]] + self.messages[-10:]
 
         self.messages.append({"role": "user", "content": user_message})
-        print(f"\nYou: {user_message}")
 
         stats = StreamStats()
 
