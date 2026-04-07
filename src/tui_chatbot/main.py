@@ -1,24 +1,17 @@
 """
-Minimal TUI Chatbot - Shell Architecture
+Minimal TUI Chatbot - Clean Separation
 
 Design:
-    - Shell: Like bash, routes commands
-    - Daemon: Stateful context (msgs, model)
-    - Commands: All callable, including Frontend (chat)
-    - Frontend is just a Command that consumes daemon's generator
-
-Analogy:
-    - Daemon = PostgreSQL server (stateful)
-    - Commands = SQL operations
-    - Frontend = "SELECT ..." (complex streaming query)
-    - /model = "\dt" (simple meta query)
+    - Daemon: Pure OpenAI API forwarder (stateful context)
+    - Events: Logic types (reasoning_token, content_token, done)
+    - Frontend: UI decisions ([Reasoning] labels, colors)
 """
 
 import os
 import sys
 import time
 import asyncio
-from typing import List, Dict, Optional, Any, NamedTuple, AsyncGenerator, Callable
+from typing import List, Dict, Optional, Any, AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -29,7 +22,7 @@ load_dotenv()
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Logger                                                    │
+# │  Utils                                                     │
 # ╰────────────────────────────────────────────────────────────╯
 
 
@@ -51,41 +44,41 @@ def log(msg: str) -> None:
     Logger().log(msg)
 
 
-# ╭────────────────────────────────────────────────────────────╮
-# │  Constants                                                 │
-# ╰────────────────────────────────────────────────────────────╯
-
-
 class C:
     GRAY = "\x1b[90m"
-    CYAN = "\x1b[36m"
     RESET = "\x1b[0m"
 
 
-PROMPT = ">>> "
-SYSTEM_MSG = {"role": "system", "content": "You are a helpful assistant."}
+# ╭────────────────────────────────────────────────────────────╮
+# │  Events (Pure Logic - No UI)                               │
+# ╰────────────────────────────────────────────────────────────╯
 
 
 class EventType(Enum):
-    OUTPUT = auto()
-    STATS = auto()
-    ERROR = auto()
-    DONE = auto()
+    """Logical event types from API stream.
+
+    No UI labels here - just what the API provides.
+    """
+
+    REASONING_TOKEN = auto()  # reasoning_content chunk
+    CONTENT_TOKEN = auto()  # content chunk
+    STATS = auto()  # Final statistics
+    DONE = auto()  # Stream complete
+    ERROR = auto()  # Error occurred
 
 
 @dataclass(frozen=True)
 class Event:
+    """Immutable event with logical type."""
+
     type: EventType
-    data: Any = None
-
-
-# ╭────────────────────────────────────────────────────────────╮
-# │  Stats                                                     │
-# ╰────────────────────────────────────────────────────────────╯
+    data: Any = None  # Token text, stats, or error message
 
 
 @dataclass
 class Stats:
+    """Statistics for streaming."""
+
     tokens: int = 0
     r_tokens: int = 0
     c_tokens: int = 0
@@ -117,7 +110,7 @@ class Stats:
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Daemon (Stateful Service)                                 │
+# │  Config                                                    │
 # ╰────────────────────────────────────────────────────────────╯
 
 
@@ -130,8 +123,22 @@ class Config:
     history: int = 10
 
 
+SYSTEM_MSG = {"role": "system", "content": "You are a helpful assistant."}
+
+
+# ╭────────────────────────────────────────────────────────────╮
+# │  Daemon (Pure API Forwarder + State)                       │
+# ╰────────────────────────────────────────────────────────────╯
+
+
 class Daemon:
-    """Stateful daemon maintaining conversation context."""
+    """Stateful daemon - forwards API stream as logical events.
+
+    Like OpenAI client but with:
+    - Context memory (msgs)
+    - Trim history
+    - Stats tracking
+    """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -154,7 +161,15 @@ class Daemon:
         self.msgs = [SYSTEM_MSG]
 
     async def chat(self, text: str) -> AsyncGenerator[Event, None]:
-        """Generator: yields events from stream."""
+        """Generate logical events from API stream.
+
+        Events are pure data:
+        - REASONING_TOKEN: raw reasoning text chunk
+        - CONTENT_TOKEN: raw content text chunk
+        - STATS: final statistics
+        - DONE: stream finished successfully
+        - ERROR: something went wrong
+        """
         if not self.client:
             yield Event(EventType.ERROR, "No API key")
             return
@@ -164,10 +179,9 @@ class Daemon:
 
         stats = Stats()
         r_buf, c_buf = "", ""
-        r_started, c_started = False, False
 
         try:
-            log(f"chat: model={self.model}")
+            log(f"stream: model={self.model}")
             stream = await self.client.chat.completions.create(
                 model=self.model, messages=self.msgs, stream=True
             )
@@ -181,38 +195,32 @@ class Daemon:
                 c = getattr(delta, "content", None)
 
                 if r:
-                    if not r_started:
+                    if not r_buf:  # First reasoning token
                         stats.on_token()
-                        r_started = True
-                        yield Event(EventType.OUTPUT, ("[Reasoning]\n", C.GRAY))
                     r_buf += r
                     stats.tokens += len(r) // 4
                     stats.r_tokens += len(r) // 4
-                    yield Event(EventType.OUTPUT, (r, C.GRAY))
+                    yield Event(EventType.REASONING_TOKEN, r)  # Pure text, no label
 
                 if c:
-                    if not c_started:
-                        if not stats.first_token:
-                            stats.on_token()
-                        c_started = True
-                        if r_started:
-                            yield Event(EventType.OUTPUT, ("\n", ""))
-                        yield Event(EventType.OUTPUT, (f"[Assistant]\nAssistant: ", ""))
+                    if not c_buf and not r_buf:  # First content, no reasoning before
+                        stats.on_token()
                     c_buf += c
                     stats.tokens += len(c) // 4
                     stats.c_tokens += len(c) // 4
-                    yield Event(EventType.OUTPUT, (c, ""))
+                    yield Event(EventType.CONTENT_TOKEN, c)  # Pure text, no label
 
+            # Complete - save to history
             resp = c_buf or r_buf
             if resp:
                 self.msgs.append({"role": "assistant", "content": resp})
-                yield Event(EventType.OUTPUT, ("\n", ""))
                 yield Event(EventType.STATS, stats)
                 yield Event(EventType.DONE, None)
             else:
                 yield Event(EventType.ERROR, "Empty response")
 
         except asyncio.CancelledError:
+            # Interrupted - save partial to history
             resp = c_buf or r_buf
             if resp:
                 self.msgs.append({"role": "assistant", "content": resp})
@@ -235,37 +243,51 @@ class Daemon:
 
 
 class Frontend:
-    """Frontend Command: handles chat by consuming daemon's generator.
+    """Frontend Command - renders logical events as UI.
 
-    Like a complex SQL query - iterates over streaming results.
+    Decides:
+    - When to print [Reasoning] label (first REASONING_TOKEN)
+    - When to print [Assistant] label (first CONTENT_TOKEN)
+    - Colors for reasoning vs content
     """
 
     def __init__(self, daemon: Daemon):
         self.daemon = daemon
 
     async def run(self, text: str) -> None:
-        """Run chat - consumes daemon's generator, handles Ctrl-C."""
+        """Consume events and render UI."""
+        r_started = False
+        c_started = False
+
         try:
             async for ev in self.daemon.chat(text):
-                self._render(ev)
+                match ev.type:
+                    case EventType.REASONING_TOKEN:
+                        if not r_started:
+                            print(f"\n{C.GRAY}[Reasoning]{C.RESET}", end="")
+                            r_started = True
+                        print(f"{C.GRAY}{ev.data}{C.RESET}", end="", flush=True)
+
+                    case EventType.CONTENT_TOKEN:
+                        if not c_started:
+                            if r_started:
+                                print()  # Newline after reasoning
+                            print(f"\n[Assistant]\nAssistant: ", end="")
+                            c_started = True
+                        print(ev.data, end="", flush=True)
+
+                    case EventType.STATS:
+                        print(f"\n{ev.data}")
+
+                    case EventType.ERROR:
+                        print(f"\n[Error: {ev.data}]")
+
+                    case EventType.DONE:
+                        pass
+
         except asyncio.CancelledError:
             print(f"\n{C.GRAY}[Stop]{C.RESET}")
             raise
-
-    def _render(self, ev: Event) -> None:
-        match ev.type:
-            case EventType.OUTPUT:
-                text, color = ev.data
-                if color:
-                    print(f"{color}{text}{C.RESET}", end="", flush=True)
-                else:
-                    print(text, end="", flush=True)
-            case EventType.STATS:
-                print(ev.data)
-            case EventType.ERROR:
-                print(f"\n[Error: {ev.data}]")
-            case EventType.DONE:
-                pass
 
 
 class ModelCommand:
@@ -276,11 +298,9 @@ class ModelCommand:
 
     async def run(self, args: str = "") -> None:
         if args.strip():
-            # Switch model
             self.daemon.switch_model(args.strip())
             print(f"Switched: {args.strip()}")
         else:
-            # List models
             print("Fetching...")
             models = await self.daemon.list_models()
             if models:
@@ -335,16 +355,15 @@ class QuitCommand:
 
 
 class Shell:
-    """Shell - routes input to appropriate Command."""
+    """Shell - routes to Commands uniformly."""
+
+    PROMPT = ">>> "
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.daemon = Daemon(cfg)
-        # All commands, including Frontend
-        self.cmds: Dict[str, Callable] = {
-            # Frontend is the default (no / prefix)
+        self.cmds = {
             "__default__": Frontend(self.daemon),
-            # Named commands
             "model": ModelCommand(self.daemon),
             "m": ModelCommand(self.daemon),
             "clear": ClearCommand(self.daemon),
@@ -357,7 +376,7 @@ class Shell:
         }
 
     def _get_cmd(self, line: str) -> tuple:
-        """Parse line into (command, args). Returns (Frontend, text) for non-commands."""
+        """Parse line into (command, args)."""
         if not line.startswith("/"):
             return self.cmds["__default__"], line
 
@@ -366,10 +385,7 @@ class Shell:
         args = parts[1] if len(parts) > 1 else ""
 
         cmd = self.cmds.get(name)
-        if cmd:
-            return cmd, args
-        # Unknown /command - treat as chat
-        return self.cmds["__default__"], line
+        return (cmd, args) if cmd else (self.cmds["__default__"], line)
 
     async def run(self) -> None:
         """Main loop."""
@@ -382,22 +398,18 @@ class Shell:
 
         while True:
             try:
-                line = input(PROMPT).strip()
+                line = input(self.PROMPT).strip()
                 if not line:
                     continue
 
                 cmd, args = self._get_cmd(line)
-
-                # Execute with cancellation support
                 task = asyncio.create_task(cmd.run(args))
                 try:
                     await task
                 except asyncio.CancelledError:
-                    # Task was cancelled (Ctrl-C during chat)
-                    pass
+                    pass  # Ctrl-C handled
 
             except KeyboardInterrupt:
-                # Ctrl-C outside of task - just show prompt again
                 print(f"\n{C.GRAY}[Interrupt]{C.RESET}")
             except EOFError:
                 print("\nBye!")
@@ -416,7 +428,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Minimal TUI Chatbot - Shell Architecture",
+        description="Minimal TUI Chatbot - Clean Separation",
         epilog="""
 Examples:
   %(prog)s
