@@ -99,12 +99,12 @@ class Stats:
 
     def __str__(self) -> str:
         if self.tokens == 0:
-            return "[0 | 0% | 0% | 0.0s]\n[TPS 0.0 | AVG 0.0 | TTFT 0.0s]"
+            return "[0 TOKENS | 0% REASONING | 0% CONTENT | 0.0s]\n[TPS 0.0 | AVG 0.0 | TTFT 0.0s]"
         r_pct = (self.r_tokens / self.tokens) * 100
         c_pct = (self.c_tokens / self.tokens) * 100
         ttft = self.first_token - self.start if self.first_token else 0.0
         return (
-            f"[{self.tokens} | {r_pct:.1f}% | {c_pct:.1f}% | {self.elapsed:.1f}s]\n"
+            f"[{self.tokens} TOKENS | {r_pct:.1f}% REASONING | {c_pct:.1f}% CONTENT | {self.elapsed:.1f}s]\n"
             f"[TPS {self.tps:.1f} | AVG {self.tps:.1f} | TTFT {ttft:.2f}s]"
         )
 
