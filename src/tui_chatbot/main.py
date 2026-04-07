@@ -278,7 +278,7 @@ class Frontend:
                         print(ev.data, end="", flush=True)
 
                     case EventType.STATS:
-                        print(f"\n{ev.data}")
+                        print(f"\n\n{ev.data}")
 
                     case EventType.ERROR:
                         print(f"\n[Error: {ev.data}]")
