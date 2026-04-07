@@ -88,7 +88,7 @@ class Stats:
     def __str__(self) -> str:
         total = self.total
         if total == 0:
-            return "[0 | 0% | 0% | 0.0s]\nTPS 0.0 | AVG 0.0 | TTFT 0.0s"
+            return "[0 | 0% | 0% | 0.0s]\n[TPS 0.0 | AVG 0.0 | TTFT 0.0s]"
 
         r_pct = (self.r_tokens / total) * 100
         c_pct = (self.c_tokens / total) * 100
@@ -99,7 +99,7 @@ class Stats:
         ttft = self.first_token - self.start if self.first_token else 0.0
 
         line1 = f"[{total} | {r_pct:.1f}% | {c_pct:.1f}% | {elapsed:.1f}s]"
-        line2 = f"TPS {tps:.1f} | AVG {tps:.1f} | TTFT {ttft:.2f}s"
+        line2 = f"[TPS {tps:.1f} | AVG {tps:.1f} | TTFT {ttft:.2f}s]"
         return f"{line1}\n{line2}"
 
 
@@ -273,6 +273,10 @@ class ChatBot:
                 print("\n[Stop]")
                 if c_buf or r_buf:
                     self.msgs.append({"role": "assistant", "content": c_buf or r_buf})
+                    print(
+                        f"{C.GRAY}{stats}{C.RESET}"
+                    )  # Print stats in gray for interrupted
+                print(C.RESET, end="")
             except Exception as e:
                 print(f"\nError: {e}")
                 self.log(f"exc: {type(e).__name__}")
