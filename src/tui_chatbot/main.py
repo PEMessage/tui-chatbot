@@ -1,11 +1,8 @@
 """
 Minimal TUI Chatbot with streaming output and TPS statistics.
-Compatible with various OpenAI-compatible API endpoints.
 
-Architecture:
-    - Dual-field extraction: reasoning + content
-    - Visual distinction between reasoning and answer
-    - Proper finish detection via finish_reason
+Compatible with various OpenAI-compatible API endpoints.
+Supports both reasoning and content streams with visual distinction.
 """
 
 import os
@@ -15,6 +12,7 @@ import argparse
 import asyncio
 from typing import List, Dict, Optional, Any, NamedTuple
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -23,22 +21,26 @@ load_dotenv()
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Styles & Constants                                        │
+# │  Constants                                                 │
 # ╰────────────────────────────────────────────────────────────╯
 
 
-class Style:
-    """ANSI color codes for terminal output."""
+class C:
+    """ANSI color codes."""
 
     GRAY = "\x1b[90m"
     RESET = "\x1b[0m"
 
 
-class Label:
-    """Output labels for different content types."""
+class L:
+    """Output labels."""
 
-    REASONING = "[Reasoning]"
-    ASSISTANT = "[Assistant]"
+    R = "[Reasoning]"  # Reasoning
+    A = "[Assistant]"  # Assistant
+
+
+PROMPT = ">>> "
+SYSTEM_MSG = {"role": "system", "content": "You are a helpful assistant."}
 
 
 # ╭────────────────────────────────────────────────────────────╮
@@ -46,78 +48,69 @@ class Label:
 # ╰────────────────────────────────────────────────────────────╯
 
 
-@dataclass
-class ChatConfig:
-    """Configuration for the chatbot."""
+@dataclass(frozen=True)
+class Config:
+    """Bot configuration."""
 
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-3.5-turbo"
     debug: bool = False
-    max_history: int = 10  # Keep last N exchanges (+ system message)
+    history: int = 10
 
 
 @dataclass
-class StreamStats:
-    """Statistics for streaming output."""
+class Stats:
+    """Streaming statistics."""
 
-    reasoning_tokens: int = 0
-    content_tokens: int = 0
-    start_time: float = field(default_factory=time.time)
+    r_tokens: int = 0  # reasoning
+    c_tokens: int = 0  # content
+    start: float = field(default_factory=time.time)
 
     @property
     def elapsed(self) -> float:
-        return time.time() - self.start_time
+        return time.time() - self.start
 
     @property
-    def total_tokens(self) -> int:
-        return self.reasoning_tokens + self.content_tokens
+    def total(self) -> int:
+        return self.r_tokens + self.c_tokens
 
     def __str__(self) -> str:
-        parts = [f"{self.total_tokens} tokens"]
-        if self.reasoning_tokens:
-            parts.append(
-                f"{self.reasoning_tokens} reasoning + {self.content_tokens} content"
-            )
-        parts.append(f"{self.elapsed:.2f}s")
+        parts = [f"{self.total}t"]  # tokens
+        if self.r_tokens:
+            parts.append(f"{self.r_tokens}r+{self.c_tokens}c")
+        parts.append(f"{self.elapsed:.1f}s")
         return " | ".join(parts)
 
 
-class ChunkContent(NamedTuple):
-    """Content extracted from a single streaming chunk."""
+class Chunk(NamedTuple):
+    """Extracted chunk content."""
 
-    reasoning: Optional[str] = None
-    content: Optional[str] = None
-    is_finished: bool = False
-    finish_reason: Optional[str] = None
+    r: Optional[str] = None  # reasoning
+    c: Optional[str] = None  # content
+    done: bool = False
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Content Extraction                                        │
+# │  Pure Functions                                            │
 # ╰────────────────────────────────────────────────────────────╯
 
 
-class ContentExtractor:
-    """Extract reasoning and content from API streaming chunks."""
+def extract(chunk: Any) -> Chunk:
+    """Extract content from streaming chunk."""
+    if not chunk.choices:
+        return Chunk()
 
-    def extract(self, chunk: Any) -> ChunkContent:
-        """Extract both fields from chunk delta."""
-        if not chunk.choices:
-            return ChunkContent()
+    choice = chunk.choices[0]
+    delta = choice.delta
+    if not delta:
+        return Chunk()
 
-        choice = chunk.choices[0]
-        delta = choice.delta
-        if not delta:
-            return ChunkContent()
-
-        finish_reason = getattr(choice, "finish_reason", None)
-
-        return ChunkContent(
-            reasoning=getattr(delta, "reasoning_content", None),
-            content=getattr(delta, "content", None),
-            is_finished=finish_reason is not None,
-            finish_reason=finish_reason,
-        )
+    return Chunk(
+        r=getattr(delta, "reasoning_content", None),
+        c=getattr(delta, "content", None),
+        done=getattr(choice, "finish_reason", None) is not None,
+    )
 
 
 # ╭────────────────────────────────────────────────────────────╮
@@ -126,293 +119,228 @@ class ContentExtractor:
 
 
 class ChatBot:
-    """Minimal shell-like chatbot with dual-field extraction."""
+    """Minimal shell-like chatbot."""
 
-    def __init__(self, config: ChatConfig):
-        self.config = config
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
         self.client: Optional[AsyncOpenAI] = None
-        self.messages: List[Dict[str, str]] = [
-            {"role": "system", "content": "You are a helpful assistant."}
-        ]
-        self.current_model = config.model
-        self.extractor = ContentExtractor()
+        self.msgs: List[Dict[str, str]] = [SYSTEM_MSG]
+        self.model = cfg.model
 
-        if config.api_key:
-            self.client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key)
+        if cfg.api_key:
+            self.client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
 
-    # ── Logging ─────────────────────────────────────────────────
+    # ── Utils ────────────────────────────────────────────────────
 
     def log(self, msg: str) -> None:
-        if self.config.debug:
-            print(f"\n[DEBUG] {msg}", flush=True)
+        if self.cfg.debug:
+            print(f"\n[DBG] {msg}", flush=True)
 
-    # ── UI Output ───────────────────────────────────────────────
+    @contextmanager
+    def _output(self):
+        """Context manager for colored output."""
+        try:
+            yield
+        finally:
+            print(C.RESET, end="")
 
-    def print_banner(self) -> None:
-        print(f"🤖 ChatBot | {self.config.base_url} | {self.current_model}")
-        print("Commands: /model, /model <name>, /clear, /help, /quit\n")
-
-    def _print_stream(
-        self, text: str, label: str, color: str = "", is_start: bool = False
+    def _show(
+        self, text: str, *, label: str = "", color: str = "", end: str = ""
     ) -> None:
-        """Unified stream printer with label and optional color."""
-        if is_start:
-            print(f"\n{color}{label}{Style.RESET} ", end="", flush=True)
-        if color:
-            print(f"{color}{text}{Style.RESET}", end="", flush=True)
-        else:
-            print(text, end="", flush=True)
+        """Print colored text with optional label."""
+        prefix = f"\n{color}{label}{C.RESET} " if label else ""
+        body = f"{color}{text}{C.RESET}" if color else text
+        print(f"{prefix}{body}", end=end, flush=True)
 
-    def _reset_output(self) -> None:
-        print(Style.RESET)
+    # ── Commands ─────────────────────────────────────────────────
 
-    # ── Commands ────────────────────────────────────────────────
-
-    async def list_models(self) -> None:
+    async def cmd_models(self) -> None:
         if not self.client:
-            print("Error: API client not initialized")
-            return
+            return print("Error: No API key")
 
         try:
-            print("Fetching models...")
+            print("Fetching...")
             models = await self.client.models.list()
-
-            print(f"\nAvailable models (current: {self.current_model}):")
-            print("-" * 50)
-            for model in sorted(models.data, key=lambda m: m.id):
-                marker = " *" if model.id == self.current_model else ""
-                print(f"  {model.id}{marker}")
-            print("-" * 50)
-            print("Use /model <name> to switch")
-
+            print(f"\nModels (current: {self.model}):")
+            print("-" * 40)
+            for m in sorted(models.data, key=lambda x: x.id):
+                print(f"  {m.id}{' *' if m.id == self.model else ''}")
+            print("-" * 40)
         except Exception as e:
             print(f"Error: {e}")
 
-    def switch_model(self, model_name: str) -> None:
-        self.current_model = model_name
-        print(f"Switched to model: {model_name}")
+    def cmd_switch(self, name: str) -> None:
+        self.model = name
+        print(f"Switched: {name}")
 
-    def clear_history(self) -> None:
-        self.messages = [{"role": "system", "content": "You are a helpful assistant."}]
-        print("History cleared")
+    def cmd_clear(self) -> None:
+        self.msgs = [SYSTEM_MSG]
+        print("Cleared")
 
-    def print_help(self) -> None:
+    def cmd_help(self) -> None:
         print("""
-Commands:
-  /model          List available models
-  /model <name>   Switch to specified model
-  /clear          Clear conversation history
-  /help           Show this help
-  /quit, /exit    Exit
+/model        List models
+/model <n>    Switch model
+/clear        Clear history
+/help         This help
+/quit, /exit  Exit
         """)
 
-    # ── Chat Streaming ────────────────────────────────────────────
+    # ── Streaming ────────────────────────────────────────────────
 
-    async def stream_chat(self, user_message: str) -> None:
+    async def chat(self, text: str) -> None:
         if not self.client:
-            print("Error: Cannot chat without API key")
-            return
+            return print("Error: No API key")
 
-        # Trim history if needed
-        max_msgs = self.config.max_history + 1  # +1 for system message
-        if len(self.messages) > max_msgs:
-            self.messages = [self.messages[0]] + self.messages[
-                -self.config.max_history :
-            ]
+        # Trim history
+        max_len = self.cfg.history + 1
+        if len(self.msgs) > max_len:
+            self.msgs = [self.msgs[0]] + self.msgs[-self.cfg.history :]
 
-        self.messages.append({"role": "user", "content": user_message})
+        self.msgs.append({"role": "user", "content": text})
 
-        stats = StreamStats()
-        reasoning_buf, content_buf = "", ""
-        reasoning_started, content_started = False, False
-        chunk_count = 0
+        stats = Stats()
+        r_buf, c_buf = "", ""
+        r_started, c_started = False, False
 
-        try:
-            self.log(f"Streaming: model={self.current_model}")
-
-            stream = await self.client.chat.completions.create(
-                model=self.current_model,
-                messages=self.messages,
-                stream=True,
-            )
-
-            async for chunk in stream:
-                chunk_count += 1
-                extracted = self.extractor.extract(chunk)
-
-                # Reasoning (thinking process)
-                if extracted.reasoning:
-                    if not reasoning_started:
-                        self._print_stream(
-                            "", Label.REASONING, Style.GRAY, is_start=True
-                        )
-                        reasoning_started = True
-                    self._print_stream(extracted.reasoning, "", Style.GRAY)
-                    reasoning_buf += extracted.reasoning
-                    stats.reasoning_tokens += len(extracted.reasoning) // 4
-
-                # Content (final answer)
-                if extracted.content:
-                    if not content_started:
-                        if reasoning_started:
-                            self._reset_output()
-                        self._print_stream(
-                            "Assistant: ", Label.ASSISTANT, is_start=True
-                        )
-                        content_started = True
-                    self._print_stream(extracted.content, "", "")
-                    content_buf += extracted.content
-                    stats.content_tokens += len(extracted.content) // 4
-
-                # Debug
-                if self.config.debug and chunk_count <= 3:
-                    self.log(
-                        f"Chunk {chunk_count}: r={bool(extracted.reasoning)}, "
-                        f"c={bool(extracted.content)}, f={extracted.is_finished}"
-                    )
-
-            self._reset_output()
-            self.log(
-                f"Complete: {chunk_count} chunks, "
-                f"{len(reasoning_buf)}r/{len(content_buf)}c chars"
-            )
-
-            # Store response
-            response = content_buf or reasoning_buf
-            if response:
-                self.messages.append({"role": "assistant", "content": response})
-                print(f"[{stats}]")
-            else:
-                print("[No content received]")
-
-        except asyncio.CancelledError:
-            self._reset_output()
-            print("\n[Interrupted]")
-            if content_buf or reasoning_buf:
-                self.messages.append(
-                    {"role": "assistant", "content": content_buf or reasoning_buf}
+        with self._output():
+            try:
+                self.log(f"model={self.model}")
+                stream = await self.client.chat.completions.create(
+                    model=self.model, messages=self.msgs, stream=True
                 )
-        except Exception as e:
-            self._reset_output()
-            print(f"\nError: {e}")
-            self.log(f"Exception: {type(e).__name__}: {e}")
 
-    # ── Main Loop ─────────────────────────────────────────────────
+                async for ch in stream:
+                    ex = extract(ch)
 
-    async def handle_command(self, cmd: str) -> bool:
+                    # Reasoning stream
+                    if ex.r:
+                        if not r_started:
+                            self._show("", label=L.R, color=C.GRAY)
+                            r_started = True
+                        self._show(ex.r, color=C.GRAY, end="")
+                        r_buf += ex.r
+                        stats.r_tokens += len(ex.r) // 4
+
+                    # Content stream
+                    if ex.c:
+                        if not c_started:
+                            if r_started:
+                                print()  # newline after reasoning
+                            self._show("Assistant: ", label=L.A)
+                            c_started = True
+                        self._show(ex.c, end="")
+                        c_buf += ex.c
+                        stats.c_tokens += len(ex.c) // 4
+
+                    self.log(f"r={bool(ex.r)} c={bool(ex.c)} done={ex.done}")
+
+                print()  # final newline
+                self.log(f"chunks: r={len(r_buf)} c={len(c_buf)}")
+
+                # Save response
+                resp = c_buf or r_buf
+                if resp:
+                    self.msgs.append({"role": "assistant", "content": resp})
+                    print(f"[{stats}]")
+                else:
+                    print("[Empty]")
+
+            except asyncio.CancelledError:
+                print("\n[Stop]")
+                if c_buf or r_buf:
+                    self.msgs.append({"role": "assistant", "content": c_buf or r_buf})
+            except Exception as e:
+                print(f"\nError: {e}")
+                self.log(f"exc: {type(e).__name__}")
+
+    # ── Main Loop ────────────────────────────────────────────────
+
+    async def handle(self, cmd: str) -> bool:
         parts = cmd.strip().split()
         if not parts:
             return True
 
         match parts[0].lower():
-            case "/quit" | "/exit":
-                print("Goodbye!")
+            case "/q" | "/quit" | "/exit":
+                print("Bye!")
                 return False
-            case "/help":
-                self.print_help()
-            case "/clear":
-                self.clear_history()
-            case "/model":
+            case "/h" | "/help":
+                self.cmd_help()
+            case "/c" | "/clear":
+                self.cmd_clear()
+            case "/m" | "/model":
                 if len(parts) > 1:
-                    self.switch_model(parts[1])
+                    self.cmd_switch(parts[1])
                 else:
-                    await self.list_models()
+                    await self.cmd_models()
             case _:
-                print(f"Unknown command: {parts[0]}")
-
+                print(f"Unknown: {parts[0]}")
         return True
 
     async def run(self) -> None:
-        self.print_banner()
+        print(f"🤖 {self.cfg.base_url} | {self.model}")
+        print("Commands: /model, /clear, /help, /quit\n")
 
         if not self.client:
-            print("Warning: OPENAI_API_KEY not set!")
+            print("⚠️  No API key set")
 
         while True:
             try:
-                user_input = input(">>> ").strip()
-
-                if not user_input:
+                inp = input(PROMPT).strip()
+                if not inp:
                     continue
 
-                if user_input.startswith("/"):
-                    if not await self.handle_command(user_input):
+                if inp.startswith("/"):
+                    if not await self.handle(inp):
                         break
                     continue
 
                 if not self.client:
-                    print("Error: No API key set")
+                    print("Error: No API key")
                     continue
 
-                await self.stream_chat(user_input)
+                await self.chat(inp)
 
             except KeyboardInterrupt:
-                print("\nUse /quit to exit")
+                print("\nUse /quit")
             except EOFError:
-                print("\nGoodbye!")
+                print("\nBye!")
                 break
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Entry Point                                               │
+# │  Entry                                                     │
 # ╰────────────────────────────────────────────────────────────╯
 
 
-def parse_args() -> ChatConfig:
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Minimal TUI Chatbot with reasoning/content separation",
+        description="Minimal TUI Chatbot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                           # Use defaults or .env
-  %(prog)s --api-key sk-xxx          # Set API key
+  %(prog)s
+  %(prog)s --api-key sk-xxx --model gpt-4
   %(prog)s --base-url http://localhost:11434/v1 --model llama2
-  %(prog)s --model gpt-4 --debug
         """,
     )
 
     parser.add_argument(
-        "--base-url",
-        type=str,
-        default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        help="API base URL",
+        "--base-url", default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     )
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=os.getenv("OPENAI_API_KEY", ""),
-        help="API key",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
-        help="Model to use",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug logging",
-    )
+    parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", ""))
+    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"))
+    parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
 
-    return ChatConfig(
-        base_url=args.base_url,
-        api_key=args.api_key,
-        model=args.model,
-        debug=args.debug,
-    )
-
-
-def main() -> None:
-    config = parse_args()
-    bot = ChatBot(config)
+    bot = ChatBot(Config(**vars(args)))
 
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
-        print("\nGoodbye!")
+        print("\nBye!")
         sys.exit(0)
 
 
