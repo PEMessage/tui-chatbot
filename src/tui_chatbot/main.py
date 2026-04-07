@@ -264,15 +264,16 @@ class Frontend:
                 match ev.type:
                     case EventType.REASONING_TOKEN:
                         if not r_started:
-                            print(f"\n{C.GRAY}[Reasoning]{C.RESET}", end="")
+                            print(f"{C.GRAY}[Reasoning]: {C.RESET}", end="", flush=True)
                             r_started = True
                         print(f"{C.GRAY}{ev.data}{C.RESET}", end="", flush=True)
 
                     case EventType.CONTENT_TOKEN:
                         if not c_started:
+                            # Type switch: add newline if we had reasoning
                             if r_started:
-                                print()  # Newline after reasoning
-                            print(f"\n[Assistant]\nAssistant: ", end="")
+                                print()
+                            print(f"[Assistant]: ", end="")
                             c_started = True
                         print(ev.data, end="", flush=True)
 
