@@ -61,11 +61,12 @@ class Config:
 
 @dataclass
 class Stats:
-    """Streaming statistics."""
+    """Streaming statistics with TPS tracking."""
 
     r_tokens: int = 0  # reasoning
     c_tokens: int = 0  # content
     start: float = field(default_factory=time.time)
+    first_token: Optional[float] = None
 
     @property
     def elapsed(self) -> float:
@@ -75,12 +76,31 @@ class Stats:
     def total(self) -> int:
         return self.r_tokens + self.c_tokens
 
+    @property
+    def tps(self) -> float:
+        return self.total / self.elapsed if self.elapsed > 0 else 0.0
+
+    def on_token(self) -> None:
+        """Record first token time."""
+        if self.first_token is None:
+            self.first_token = time.time()
+
     def __str__(self) -> str:
-        parts = [f"{self.total}t"]  # tokens
-        if self.r_tokens:
-            parts.append(f"{self.r_tokens}r+{self.c_tokens}c")
-        parts.append(f"{self.elapsed:.1f}s")
-        return " | ".join(parts)
+        total = self.total
+        if total == 0:
+            return "[0 | 0% | 0% | 0.0s]\nTPS 0.0 | AVG 0.0 | TTFT 0.0s"
+
+        r_pct = (self.r_tokens / total) * 100
+        c_pct = (self.c_tokens / total) * 100
+        elapsed = self.elapsed
+        tps = self.tps
+
+        # TTFT: Time To First Token
+        ttft = self.first_token - self.start if self.first_token else 0.0
+
+        line1 = f"[{total} | {r_pct:.1f}% | {c_pct:.1f}% | {elapsed:.1f}s]"
+        line2 = f"TPS {tps:.1f} | AVG {tps:.1f} | TTFT {ttft:.2f}s"
+        return f"{line1}\n{line2}"
 
 
 class Chunk(NamedTuple):
@@ -218,6 +238,7 @@ class ChatBot:
                         if not r_started:
                             self._show("", label=L.R, color=C.GRAY)
                             r_started = True
+                            stats.on_token()  # First token
                         self._show(ex.r, color=C.GRAY, end="")
                         r_buf += ex.r
                         stats.r_tokens += len(ex.r) // 4
@@ -229,6 +250,8 @@ class ChatBot:
                                 print()  # newline after reasoning
                             self._show("Assistant: ", label=L.A)
                             c_started = True
+                            if not stats.first_token:
+                                stats.on_token()  # First token (if no reasoning)
                         self._show(ex.c, end="")
                         c_buf += ex.c
                         stats.c_tokens += len(ex.c) // 4
@@ -242,7 +265,7 @@ class ChatBot:
                 resp = c_buf or r_buf
                 if resp:
                     self.msgs.append({"role": "assistant", "content": resp})
-                    print(f"[{stats}]")
+                    print(f"{stats}")  # stats already includes brackets
                 else:
                     print("[Empty]")
 
