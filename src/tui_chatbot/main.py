@@ -3,9 +3,9 @@ Minimal TUI Chatbot with streaming output and TPS statistics.
 Compatible with various OpenAI-compatible API endpoints.
 
 Architecture:
-    - ContentExtractor protocol for API-specific text extraction
-    - Simple adapter pattern for different response formats
-    - Modern Python: type hints, dataclasses, protocols
+    - Unified ContentExtractor that checks all known fields
+    - Handles both standard content and reasoning_content
+    - Modern Python: type hints, dataclasses
 """
 
 import os
@@ -13,9 +13,8 @@ import sys
 import time
 import argparse
 import asyncio
-from typing import List, Dict, Optional, Protocol, Callable, Any
+from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
-from abc import ABC, abstractmethod
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -54,27 +53,19 @@ class StreamStats:
         )
 
 
-class ContentExtractor(Protocol):
-    """Protocol for extracting text content from streaming chunks.
+class ContentExtractor:
+    """Extract text content from streaming chunks.
 
-    Different API endpoints may return content in different fields:
-    - Standard OpenAI: delta.content
-    - Doubao/Seed: delta.reasoning_content
-    - Others: may have different structures
+    Unified extraction: checks all known content fields and returns
+    the first available one. For reasoning models (DeepSeek, Doubao),
+    this captures reasoning_content first, then content.
     """
 
-    def extract(self, chunk: Any) -> Optional[str]:
-        """Extract text content from a chunk. Return None if no content."""
-        ...
-
-
-# Built-in extractors
-
-
-class StandardContentExtractor:
-    """Standard OpenAI API: content in delta.content field."""
+    # Fields to check, in order of priority
+    CONTENT_FIELDS = ["reasoning_content", "content"]
 
     def extract(self, chunk: Any) -> Optional[str]:
+        """Extract text from chunk. Returns first available content or None."""
         if not chunk.choices:
             return None
 
@@ -82,94 +73,26 @@ class StandardContentExtractor:
         if not delta:
             return None
 
-        content = getattr(delta, "content", None)
-        return content if content else None
+        # Check all known content fields
+        for field in self.CONTENT_FIELDS:
+            text = getattr(delta, field, None)
+            if text is not None and text != "":
+                return text
 
-
-class ReasoningContentExtractor:
-    """Doubao/Seed models: content in delta.reasoning_content field."""
-
-    def extract(self, chunk: Any) -> Optional[str]:
-        if not chunk.choices:
-            return None
-
-        delta = chunk.choices[0].delta
-        if not delta:
-            return None
-
-        # Try reasoning_content first (for reasoning models)
-        reasoning = getattr(delta, "reasoning_content", None)
-        if reasoning:
-            return reasoning
-
-        # Fallback to standard content field
-        content = getattr(delta, "content", None)
-        return content if content else None
-
-
-class CompositeExtractor:
-    """Try multiple extractors in order."""
-
-    def __init__(self, extractors: List[ContentExtractor]):
-        self.extractors = extractors
-
-    def extract(self, chunk: Any) -> Optional[str]:
-        for extractor in self.extractors:
-            content = extractor.extract(chunk)
-            if content:
-                return content
         return None
 
 
-# Registry of known API patterns
-EXTRACTOR_REGISTRY: Dict[str, ContentExtractor] = {
-    "default": StandardContentExtractor(),
-    "openai": StandardContentExtractor(),
-    "doubao": ReasoningContentExtractor(),
-    "seed": ReasoningContentExtractor(),
-    "ark": ReasoningContentExtractor(),  # ByteDance Ark platform
-}
-
-
-def get_extractor(base_url: str, model: str) -> ContentExtractor:
-    """Get appropriate extractor based on URL and model hints.
-
-    Args:
-        base_url: API base URL for pattern matching
-        model: Model name for pattern matching
-
-    Returns:
-        ContentExtractor instance for the detected API type
-    """
-    url_lower = base_url.lower()
-    model_lower = model.lower()
-
-    # Check URL patterns
-    if any(host in url_lower for host in ["volces", "ark", "doubao", "seed"]):
-        return ReasoningContentExtractor()
-
-    # Check model name patterns
-    if any(name in model_lower for name in ["doubao", "seed"]):
-        return ReasoningContentExtractor()
-
-    return StandardContentExtractor()
-
-
 class ChatBot:
-    """Minimal shell-like chatbot with pluggable content extraction."""
+    """Minimal shell-like chatbot with unified content extraction."""
 
-    def __init__(
-        self, config: ChatConfig, extractor: Optional[ContentExtractor] = None
-    ):
+    def __init__(self, config: ChatConfig):
         self.config = config
         self.client: Optional[AsyncOpenAI] = None
         self.messages: List[Dict[str, str]] = [
             {"role": "system", "content": "You are a helpful assistant."}
         ]
         self.current_model = config.model
-
-        # Auto-detect or use provided extractor
-        self.extractor = extractor or get_extractor(config.base_url, config.model)
+        self.extractor = ContentExtractor()  # Unified extractor
 
         if config.api_key:
             self.client = AsyncOpenAI(
@@ -186,9 +109,6 @@ class ChatBot:
         """Print welcome message."""
         print(f"🤖 ChatBot | URL: {self.config.base_url} | Model: {self.current_model}")
         print("Commands: /model, /model <name>, /clear, /help, /quit")
-        if self.config.debug:
-            extractor_name = type(self.extractor).__name__
-            print(f"[Debug: extractor={extractor_name}]")
         print()
 
     async def list_models(self) -> None:
@@ -215,12 +135,9 @@ class ChatBot:
             print(f"Error: {e}")
 
     def switch_model(self, model_name: str) -> None:
-        """Switch model and update extractor if needed."""
+        """Switch model."""
         self.current_model = model_name
-        # Re-detect extractor for new model
-        self.extractor = get_extractor(self.config.base_url, model_name)
         print(f"Switched to model: {model_name}")
-        self.log(f"Updated extractor to {type(self.extractor).__name__}")
 
     def clear_history(self) -> None:
         """Clear conversation history."""
@@ -262,7 +179,7 @@ Tips:
         print("Assistant: ", end="", flush=True)
 
         try:
-            self.log(f"Starting stream with {type(self.extractor).__name__}")
+            self.log(f"Starting stream with model={self.current_model}")
 
             stream = await self.client.chat.completions.create(
                 model=self.current_model,
@@ -273,7 +190,7 @@ Tips:
             async for chunk in stream:
                 chunk_count += 1
 
-                # Use extractor to get content
+                # Extract and print content
                 text = self.extractor.extract(chunk)
 
                 if text:
@@ -409,18 +326,9 @@ Examples:
 
 
 def main() -> None:
-    """Entry point with auto-detection of API type."""
+    """Entry point."""
     config = parse_args()
-
-    # Auto-detect appropriate extractor
-    extractor = get_extractor(config.base_url, config.model)
-
-    if config.debug:
-        print(f"[DEBUG] Using extractor: {type(extractor).__name__}")
-        print(f"[DEBUG] Base URL: {config.base_url}")
-        print(f"[DEBUG] Model: {config.model}")
-
-    bot = ChatBot(config, extractor=extractor)
+    bot = ChatBot(config)
 
     try:
         asyncio.run(bot.run())
