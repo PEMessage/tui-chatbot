@@ -256,11 +256,17 @@ class Frontend:
 
     async def run(self, text: str) -> None:
         """Consume events and render UI."""
+        prev_type = None
         r_started = False
         c_started = False
 
         try:
             async for ev in self.daemon.chat(text):
+                # Add newline on event type switch (except first)
+                if prev_type is not None and ev.type != prev_type:
+                    print()
+                prev_type = ev.type
+
                 match ev.type:
                     case EventType.REASONING_TOKEN:
                         if not r_started:
@@ -270,18 +276,15 @@ class Frontend:
 
                     case EventType.CONTENT_TOKEN:
                         if not c_started:
-                            # Type switch: add newline if we had reasoning
-                            if r_started:
-                                print()
                             print(f"[Assistant]: ", end="")
                             c_started = True
                         print(ev.data, end="", flush=True)
 
                     case EventType.STATS:
-                        print(f"\n\n{ev.data}")
+                        print(f"\n{ev.data}")
 
                     case EventType.ERROR:
-                        print(f"\n[Error: {ev.data}]")
+                        print(f"[Error: {ev.data}]")
 
                     case EventType.DONE:
                         pass
