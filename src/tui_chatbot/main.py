@@ -1,25 +1,24 @@
 """
-Minimal TUI Chatbot - Daemon Architecture
+Minimal TUI Chatbot - Shell Architecture
 
 Design:
-    - ChatBotDaemon: Stateful service (context memory)
-    - Frontend: One-shot command (like `ls`, `cat`)
-    - Commands: Also one-shot, but talk to daemon
-    - All operations are interruptible (Ctrl-C)
-    - Unified interface: all return AsyncGenerator[Event, None]
+    - Shell: Like bash, routes commands
+    - Daemon: Stateful context (msgs, model)
+    - Commands: All callable, including Frontend (chat)
+    - Frontend is just a Command that consumes daemon's generator
 
 Analogy:
-    - ChatBotDaemon = PostgreSQL server
-    - Frontend = psql client (default connection)
-    - Commands = sql commands via psql
+    - Daemon = PostgreSQL server (stateful)
+    - Commands = SQL operations
+    - Frontend = "SELECT ..." (complex streaming query)
+    - /model = "\dt" (simple meta query)
 """
 
 import os
 import sys
 import time
-import argparse
 import asyncio
-from typing import List, Dict, Optional, Any, NamedTuple, AsyncGenerator
+from typing import List, Dict, Optional, Any, NamedTuple, AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -30,13 +29,11 @@ load_dotenv()
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Global Logger                                             │
+# │  Logger                                                    │
 # ╰────────────────────────────────────────────────────────────╯
 
 
 class Logger:
-    """Global singleton logger."""
-
     _instance: Optional["Logger"] = None
     enabled: bool = False
 
@@ -55,13 +52,11 @@ def log(msg: str) -> None:
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Protocols & Constants                                     │
+# │  Constants                                                 │
 # ╰────────────────────────────────────────────────────────────╯
 
 
 class C:
-    """ANSI colors."""
-
     GRAY = "\x1b[90m"
     CYAN = "\x1b[36m"
     RESET = "\x1b[0m"
@@ -72,19 +67,14 @@ SYSTEM_MSG = {"role": "system", "content": "You are a helpful assistant."}
 
 
 class EventType(Enum):
-    """All possible event types - unified protocol."""
-
-    OUTPUT = auto()  # Normal output
-    STATS = auto()  # Statistics
-    ERROR = auto()  # Error message
-    DONE = auto()  # Operation complete
-    STOP = auto()  # Interrupted
+    OUTPUT = auto()
+    STATS = auto()
+    ERROR = auto()
+    DONE = auto()
 
 
 @dataclass(frozen=True)
 class Event:
-    """Event - the universal interface."""
-
     type: EventType
     data: Any = None
 
@@ -96,9 +86,9 @@ class Event:
 
 @dataclass
 class Stats:
-    """Statistics for any operation."""
-
     tokens: int = 0
+    r_tokens: int = 0
+    c_tokens: int = 0
     start: float = field(default_factory=time.time)
     first_token: Optional[float] = None
 
@@ -116,26 +106,34 @@ class Stats:
 
     def __str__(self) -> str:
         if self.tokens == 0:
-            return "[0 | 0.0s]\n[TPS 0.0 | TTFT 0.0s]"
+            return "[0 | 0% | 0% | 0.0s]\n[TPS 0.0 | AVG 0.0 | TTFT 0.0s]"
+        r_pct = (self.r_tokens / self.tokens) * 100
+        c_pct = (self.c_tokens / self.tokens) * 100
         ttft = self.first_token - self.start if self.first_token else 0.0
         return (
-            f"[{self.tokens} | {self.elapsed:.1f}s]\n"
-            f"[TPS {self.tps:.1f} | TTFT {ttft:.2f}s]"
+            f"[{self.tokens} | {r_pct:.1f}% | {c_pct:.1f}% | {self.elapsed:.1f}s]\n"
+            f"[TPS {self.tps:.1f} | AVG {self.tps:.1f} | TTFT {ttft:.2f}s]"
         )
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  ChatBotDaemon (Stateful Service)                          │
+# │  Daemon (Stateful Service)                                 │
 # ╰────────────────────────────────────────────────────────────╯
 
 
-class ChatBotDaemon:
-    """Stateful daemon - keeps conversation history.
+@dataclass(frozen=True)
+class Config:
+    base_url: str = "https://api.openai.com/v1"
+    api_key: str = ""
+    model: str = "gpt-3.5-turbo"
+    debug: bool = False
+    history: int = 10
 
-    Like a database server - maintains state between queries.
-    """
 
-    def __init__(self, cfg: "Config"):
+class Daemon:
+    """Stateful daemon maintaining conversation context."""
+
+    def __init__(self, cfg: Config):
         self.cfg = cfg
         self.client: Optional[AsyncOpenAI] = None
         self.msgs: List[Dict[str, str]] = [SYSTEM_MSG]
@@ -144,50 +142,19 @@ class ChatBotDaemon:
         if cfg.api_key:
             self.client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
 
-    # ── Public API (synchronous interface) ─────────────────────────
-
     def trim_history(self) -> None:
-        """Trim messages to max history."""
         max_len = self.cfg.history + 1
         if len(self.msgs) > max_len:
             self.msgs = [self.msgs[0]] + self.msgs[-self.cfg.history :]
 
-    def get_models(self) -> List[str]:
-        """Get available models (async operation)."""
-        if not self.client:
-            return []
-        # Returns coroutine - caller must await
-        return self._fetch_models()
-
     def switch_model(self, name: str) -> None:
-        """Switch current model."""
         self.model = name
 
-    def clear_history(self) -> None:
-        """Clear conversation history."""
+    def clear(self) -> None:
         self.msgs = [SYSTEM_MSG]
 
-    # ── Async Operations (generators) ───────────────────────────
-
-    async def _fetch_models(self) -> List[str]:
-        """Internal: fetch models from API."""
-        if not self.client:
-            return []
-        try:
-            models = await self.client.models.list()
-            return [m.id for m in models.data]
-        except Exception as e:
-            return []
-
-    def chat(self, text: str) -> AsyncGenerator[Event, None]:
-        """Chat operation - yields events.
-
-        This is the MAIN operation. Like `psql -c "SELECT ..."`
-        """
-        return self._chat_stream(text)
-
-    async def _chat_stream(self, text: str) -> AsyncGenerator[Event, None]:
-        """Internal: streaming chat implementation."""
+    async def chat(self, text: str) -> AsyncGenerator[Event, None]:
+        """Generator: yields events from stream."""
         if not self.client:
             yield Event(EventType.ERROR, "No API key")
             return
@@ -213,17 +180,16 @@ class ChatBotDaemon:
                 r = getattr(delta, "reasoning_content", None)
                 c = getattr(delta, "content", None)
 
-                # Reasoning tokens
                 if r:
                     if not r_started:
                         stats.on_token()
                         r_started = True
-                        yield Event(EventType.OUTPUT, ("[Reasoning]", C.GRAY))
+                        yield Event(EventType.OUTPUT, ("[Reasoning]\n", C.GRAY))
                     r_buf += r
                     stats.tokens += len(r) // 4
+                    stats.r_tokens += len(r) // 4
                     yield Event(EventType.OUTPUT, (r, C.GRAY))
 
-                # Content tokens
                 if c:
                     if not c_started:
                         if not stats.first_token:
@@ -231,15 +197,12 @@ class ChatBotDaemon:
                         c_started = True
                         if r_started:
                             yield Event(EventType.OUTPUT, ("\n", ""))
-                        yield Event(EventType.OUTPUT, ("[Assistant]", ""))
-                        yield Event(EventType.OUTPUT, ("Assistant: ", ""))
+                        yield Event(EventType.OUTPUT, (f"[Assistant]\nAssistant: ", ""))
                     c_buf += c
                     stats.tokens += len(c) // 4
+                    stats.c_tokens += len(c) // 4
                     yield Event(EventType.OUTPUT, (c, ""))
 
-                log(f"chunk: r={bool(r)} c={bool(c)}")
-
-            # Complete
             resp = c_buf or r_buf
             if resp:
                 self.msgs.append({"role": "assistant", "content": resp})
@@ -250,145 +213,46 @@ class ChatBotDaemon:
                 yield Event(EventType.ERROR, "Empty response")
 
         except asyncio.CancelledError:
-            # Interrupted - save partial
             resp = c_buf or r_buf
             if resp:
                 self.msgs.append({"role": "assistant", "content": resp})
-                yield Event(EventType.OUTPUT, ("\n", ""))
-                yield Event(EventType.STOP, stats)
             raise
 
-
-# ╭────────────────────────────────────────────────────────────╮
-# │  Config                                                    │
-# ╰────────────────────────────────────────────────────────────╯
-
-
-@dataclass(frozen=True)
-class Config:
-    """Bot configuration."""
-
-    base_url: str = "https://api.openai.com/v1"
-    api_key: str = ""
-    model: str = "gpt-3.5-turbo"
-    debug: bool = False
-    history: int = 10
+    async def list_models(self) -> List[str]:
+        if not self.client:
+            return []
+        try:
+            models = await self.client.models.list()
+            return [m.id for m in models.data]
+        except Exception as e:
+            log(f"list_models error: {e}")
+            return []
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Operation (Unified Interface)                               │
+# │  Commands (All Uniform)                                    │
 # ╰────────────────────────────────────────────────────────────╯
 
 
-class Operation:
-    """Any operation that can be executed and interrupted.
+class Frontend:
+    """Frontend Command: handles chat by consuming daemon's generator.
 
-    Both Frontend (chat) and Commands use this interface.
+    Like a complex SQL query - iterates over streaming results.
     """
 
-    def __init__(self, daemon: ChatBotDaemon):
+    def __init__(self, daemon: Daemon):
         self.daemon = daemon
 
-    async def run(self, *args, **kwargs) -> AsyncGenerator[Event, None]:
-        """Execute operation - must be implemented by subclasses."""
-        raise NotImplementedError
-
-
-class ChatOperation(Operation):
-    """Chat operation - the default operation."""
-
-    async def run(self, text: str) -> AsyncGenerator[Event, None]:
-        """Run chat - delegates to daemon."""
-        async for ev in self.daemon.chat(text):
-            yield ev
-
-
-class ListModelsOperation(Operation):
-    """List models operation."""
-
-    async def run(self) -> AsyncGenerator[Event, None]:
-        """Fetch and yield models."""
-        if not self.daemon.client:
-            yield Event(EventType.ERROR, "No API key")
-            return
-
-        stats = Stats()
-        yield Event(EventType.OUTPUT, ("Fetching...", ""))
-
+    async def run(self, text: str) -> None:
+        """Run chat - consumes daemon's generator, handles Ctrl-C."""
         try:
-            models = await self.daemon._fetch_models()
-            stats.on_token()
-            stats.tokens = len(models)
-
-            if models:
-                lines = [f"Models (current: {self.daemon.model}):"]
-                lines.append("-" * 40)
-                for m in sorted(models):
-                    marker = " *" if m == self.daemon.model else ""
-                    lines.append(f"  {m}{marker}")
-                lines.append("-" * 40)
-                yield Event(EventType.OUTPUT, ("\n".join(lines), ""))
-                yield Event(EventType.STATS, stats)
-                yield Event(EventType.DONE, None)
-            else:
-                yield Event(EventType.ERROR, "No models available")
-
+            async for ev in self.daemon.chat(text):
+                self._render(ev)
         except asyncio.CancelledError:
-            yield Event(EventType.STOP, stats)
+            print(f"\n{C.GRAY}[Stop]{C.RESET}")
             raise
 
-
-class SwitchModelOperation(Operation):
-    """Switch model operation."""
-
-    async def run(self, name: str) -> AsyncGenerator[Event, None]:
-        """Switch model."""
-        self.daemon.switch_model(name)
-        yield Event(EventType.OUTPUT, (f"Switched: {name}", ""))
-        yield Event(EventType.DONE, None)
-
-
-class ClearOperation(Operation):
-    """Clear history operation."""
-
-    async def run(self) -> AsyncGenerator[Event, None]:
-        """Clear conversation."""
-        self.daemon.clear_history()
-        yield Event(EventType.OUTPUT, ("Cleared", ""))
-        yield Event(EventType.DONE, None)
-
-
-class HelpOperation(Operation):
-    """Help operation."""
-
-    async def run(self) -> AsyncGenerator[Event, None]:
-        """Show help."""
-        help_text = """
-Commands:
-  <text>          Chat with bot (default)
-  /model          List models
-  /model <name>   Switch model
-  /clear          Clear history
-  /help           This help
-  /quit, /exit    Exit
-
-Press Ctrl-C to interrupt any operation.
-        """.strip()
-        yield Event(EventType.OUTPUT, (help_text, ""))
-        yield Event(EventType.DONE, None)
-
-
-# ╭────────────────────────────────────────────────────────────╮
-# │  Renderer (UI Layer)                                       │
-# ╰────────────────────────────────────────────────────────────╯
-
-
-class Renderer:
-    """Render events to terminal."""
-
-    @staticmethod
-    def render(ev: Event) -> None:
-        """Render single event."""
+    def _render(self, ev: Event) -> None:
         match ev.type:
             case EventType.OUTPUT:
                 text, color = ev.data
@@ -397,14 +261,72 @@ class Renderer:
                 else:
                     print(text, end="", flush=True)
             case EventType.STATS:
-                print(f"{ev.data}")
+                print(ev.data)
             case EventType.ERROR:
                 print(f"\n[Error: {ev.data}]")
             case EventType.DONE:
-                pass  # Silent
-            case EventType.STOP:
-                print(f"\n{C.GRAY}[Stop]{C.RESET}")
-                print(f"{C.GRAY}{ev.data}{C.RESET}")
+                pass
+
+
+class ModelCommand:
+    """/model - List or switch models."""
+
+    def __init__(self, daemon: Daemon):
+        self.daemon = daemon
+
+    async def run(self, args: str = "") -> None:
+        if args.strip():
+            # Switch model
+            self.daemon.switch_model(args.strip())
+            print(f"Switched: {args.strip()}")
+        else:
+            # List models
+            print("Fetching...")
+            models = await self.daemon.list_models()
+            if models:
+                print(f"\nModels (current: {self.daemon.model}):")
+                print("-" * 40)
+                for m in sorted(models):
+                    marker = " *" if m == self.daemon.model else ""
+                    print(f"  {m}{marker}")
+                print("-" * 40)
+            else:
+                print("No models available")
+
+
+class ClearCommand:
+    """/clear - Clear history."""
+
+    def __init__(self, daemon: Daemon):
+        self.daemon = daemon
+
+    async def run(self, args: str = "") -> None:
+        self.daemon.clear()
+        print("Cleared")
+
+
+class HelpCommand:
+    """/help - Show help."""
+
+    async def run(self, args: str = "") -> None:
+        print("""
+Commands:
+  <text>          Chat with bot (default)
+  /model [name]   List or switch models
+  /clear          Clear history
+  /help           This help
+  /quit, /exit    Exit
+
+Press Ctrl-C to interrupt chat.
+        """)
+
+
+class QuitCommand:
+    """/quit - Exit."""
+
+    async def run(self, args: str = "") -> None:
+        print("Bye!")
+        sys.exit(0)
 
 
 # ╭────────────────────────────────────────────────────────────╮
@@ -413,62 +335,41 @@ class Renderer:
 
 
 class Shell:
-    """Shell - routes input to operations.
-
-    Like bash: parses input, creates operation, executes.
-    """
+    """Shell - routes input to appropriate Command."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        # Single daemon instance (like PostgreSQL server)
-        self.daemon = ChatBotDaemon(cfg)
-        self.renderer = Renderer()
+        self.daemon = Daemon(cfg)
+        # All commands, including Frontend
+        self.cmds: Dict[str, Callable] = {
+            # Frontend is the default (no / prefix)
+            "__default__": Frontend(self.daemon),
+            # Named commands
+            "model": ModelCommand(self.daemon),
+            "m": ModelCommand(self.daemon),
+            "clear": ClearCommand(self.daemon),
+            "c": ClearCommand(self.daemon),
+            "help": HelpCommand(),
+            "h": HelpCommand(),
+            "quit": QuitCommand(),
+            "q": QuitCommand(),
+            "exit": QuitCommand(),
+        }
 
-    def _parse(self, line: str) -> tuple[Operation, tuple, dict]:
-        """Parse input into (operation, args, kwargs).
-
-        Returns ChatOperation for non-command text.
-        """
+    def _get_cmd(self, line: str) -> tuple:
+        """Parse line into (command, args). Returns (Frontend, text) for non-commands."""
         if not line.startswith("/"):
-            # DEFAULT: Chat (like default command in shell)
-            return ChatOperation(self.daemon), (line,), {}
+            return self.cmds["__default__"], line
 
         parts = line.split(maxsplit=1)
-        cmd = parts[0][1:].lower()
+        name = parts[0][1:].lower()
         args = parts[1] if len(parts) > 1 else ""
 
-        match cmd:
-            case "model" | "m":
-                if args:
-                    return SwitchModelOperation(self.daemon), (args,), {}
-                return ListModelsOperation(self.daemon), (), {}
-            case "clear" | "c":
-                return ClearOperation(self.daemon), (), {}
-            case "help" | "h":
-                return HelpOperation(self.daemon), (), {}
-            case "quit" | "q" | "exit":
-                print("Bye!")
-                sys.exit(0)
-            case _:
-                # Unknown command - treat as chat
-                return ChatOperation(self.daemon), (line,), {}
-
-    async def _execute(self, op: Operation, args: tuple, kwargs: dict) -> None:
-        """Execute operation with cancellation support."""
-        task = asyncio.create_task(self._consume(op, args, kwargs))
-        try:
-            await task
-        except asyncio.CancelledError:
-            # Operation was interrupted
-            pass
-
-    async def _consume(self, op: Operation, args: tuple, kwargs: dict) -> None:
-        """Consume operation events."""
-        try:
-            async for ev in op.run(*args, **kwargs):
-                self.renderer.render(ev)
-        except asyncio.CancelledError:
-            raise
+        cmd = self.cmds.get(name)
+        if cmd:
+            return cmd, args
+        # Unknown /command - treat as chat
+        return self.cmds["__default__"], line
 
     async def run(self) -> None:
         """Main loop."""
@@ -477,7 +378,7 @@ class Shell:
         print("Default: chat (type anything)\n")
 
         if not self.daemon.client:
-            print("⚠️  No API key set")
+            print("⚠️  No API key")
 
         while True:
             try:
@@ -485,20 +386,25 @@ class Shell:
                 if not line:
                     continue
 
-                # Parse into operation
-                op, args, kwargs = self._parse(line)
+                cmd, args = self._get_cmd(line)
 
-                # Execute with Ctrl-C support
-                await self._execute(op, args, kwargs)
+                # Execute with cancellation support
+                task = asyncio.create_task(cmd.run(args))
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    # Task was cancelled (Ctrl-C during chat)
+                    pass
 
             except KeyboardInterrupt:
+                # Ctrl-C outside of task - just show prompt again
                 print(f"\n{C.GRAY}[Interrupt]{C.RESET}")
             except EOFError:
                 print("\nBye!")
                 break
             except Exception as e:
                 print(f"\n[Error: {e}]")
-                log(f"error: {type(e).__name__}")
+                log(f"shell error: {type(e).__name__}")
 
 
 # ╭────────────────────────────────────────────────────────────╮
@@ -507,12 +413,14 @@ class Shell:
 
 
 def main() -> None:
+    import argparse
+
     parser = argparse.ArgumentParser(
-        description="Minimal TUI Chatbot - Daemon Architecture",
+        description="Minimal TUI Chatbot - Shell Architecture",
         epilog="""
 Examples:
-  %(prog)s                    # Interactive shell
-  %(prog)s --api-key sk-xxx   # With custom key
+  %(prog)s
+  %(prog)s --api-key sk-xxx --model gpt-4
         """,
     )
 
