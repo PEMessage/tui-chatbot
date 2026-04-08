@@ -40,6 +40,8 @@ try:
         ClearCommand,
         HelpCommand,
         QuitCommand,
+        SearchCommand,
+        ExportCommand,
         Logger as FrontendLogger,
         C,
     )
@@ -56,6 +58,7 @@ try:
         ToolRegistry,
         create_default_tool_registry,
     )
+    from .session import SessionManager, SessionStorage
 except ImportError:
     # 直接运行时回退到绝对导入
     import sys
@@ -69,6 +72,8 @@ except ImportError:
         ClearCommand,
         HelpCommand,
         QuitCommand,
+        SearchCommand,
+        ExportCommand,
         Logger as FrontendLogger,
         C,
     )
@@ -85,6 +90,7 @@ except ImportError:
         ToolRegistry,
         create_default_tool_registry,
     )
+    from tui_chatbot.session import SessionManager, SessionStorage
 
 
 # ╭────────────────────────────────────────────────────────────╮
@@ -204,13 +210,23 @@ class Shell:
             # 回退到旧架构 Daemon
             self.daemon = LegacyDaemon(cfg)
 
+        # 创建 SessionManager
+        storage = SessionStorage()
+        self.session_manager = SessionManager(storage)
+
+        # 创建前端
+        self.frontend = Frontend(self.daemon)
+
         # 创建命令
         self.cmds = {
-            "__default__": Frontend(self.daemon),
+            "__default__": self.frontend,
             "model": ModelCommand(self.daemon),
             "m": ModelCommand(self.daemon),
             "clear": ClearCommand(self.daemon),
             "c": ClearCommand(self.daemon),
+            "search": SearchCommand(self.session_manager, self.frontend),
+            "s": SearchCommand(self.session_manager, self.frontend),
+            "export": ExportCommand(self.session_manager),
             "help": HelpCommand(),
             "h": HelpCommand(),
             "quit": QuitCommand(),
@@ -271,7 +287,7 @@ class Shell:
         else:
             print(f"🤖 Model: {self.daemon.model}")
 
-        print("Commands: /model, /clear, /help, /quit")
+        print("Commands: /model, /search, /export, /clear, /help, /quit")
         print("Default: chat (type anything)\n")
 
         if not provider:

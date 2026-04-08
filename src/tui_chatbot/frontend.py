@@ -347,11 +347,16 @@ class HelpCommand:
         """运行帮助命令."""
         print("""
 Commands:
-  <text>          Chat with bot (default)
-  /model [name]   List or switch models
-  /clear          Clear history
-  /help           This help
-  /quit, /exit    Exit
+  <text>                    Chat with bot (default)
+  /model [name]             List or switch models
+  /search <keyword>         Search messages in session history
+                            Options: --regex, --user-only, --assistant-only
+  /export [--json] [--all]  Export session(s) to file
+                            --json: Export as JSON (default: Markdown)
+                            --all: Export all sessions (default: current)
+  /clear                    Clear history
+  /help                     This help
+  /quit, /exit              Exit
 
 Press Ctrl-C to interrupt chat.
         """)
@@ -368,3 +373,99 @@ class QuitCommand:
 
         print("Bye!")
         sys.exit(0)
+
+
+class SearchCommand:
+    """搜索命令 /search <keyword> [--regex] [--user-only] [--assistant-only]"""
+
+    META = {
+        "pass_mode": "shlex",
+        "name": "search",
+        "help": "在会话历史中搜索消息",
+        "args": ["keyword"],
+        "options": ["--regex", "--user-only", "--assistant-only"],
+    }
+
+    def __init__(self, session_manager, frontend):
+        self._session_manager = session_manager
+        self._frontend = frontend
+
+    async def run(self, argv: List[str]) -> None:
+        """运行搜索命令."""
+        if len(argv) < 2:
+            print("Usage: /search <keyword> [--regex] [--user-only] [--assistant-only]")
+            return
+
+        # 解析参数
+        args = argv[1:]  # 去掉命令名
+        keyword = args[0]
+        use_regex = "--regex" in args
+
+        from ..search import MessageSearchEngine, SearchScope
+
+        current = self._session_manager.current()
+        if not current:
+            print("No active session")
+            return
+
+        engine = MessageSearchEngine()
+        engine.index_session(current)
+
+        scope = SearchScope.ALL
+        if "--user-only" in args:
+            scope = SearchScope.USER_ONLY
+        elif "--assistant-only" in args:
+            scope = SearchScope.ASSISTANT_ONLY
+
+        result = engine.search(keyword, scope=scope, use_regex=use_regex)
+
+        if not result.matches:
+            print(f"No messages found matching '{keyword}'")
+            return
+
+        print(f"\nFound {result.total_matches} results:\n")
+        for i, match in enumerate(result.matches[:10], 1):
+            role = getattr(match.message, "role", "unknown")
+            # 高亮匹配内容
+            highlighted = f"{match.context_before}\033[1m{match.matched_text}\033[0m{match.context_after}"
+            print(f"{i}. [{role}] ...{highlighted}...")
+
+
+class ExportCommand:
+    """导出命令 /export [--json] [--all] [session_id]"""
+
+    META = {
+        "pass_mode": "shlex",
+        "name": "export",
+        "help": "导出会话到文件",
+        "args": ["[session_id]"],
+        "options": ["--json", "--all"],
+    }
+
+    def __init__(self, session_manager):
+        self._session_manager = session_manager
+
+    async def run(self, argv: List[str]) -> None:
+        """运行导出命令."""
+        from ..export import SessionExporter, ExportFormat
+
+        args = argv[1:]  # 去掉命令名
+        use_json = "--json" in args
+        format_type = ExportFormat.JSON if use_json else ExportFormat.MARKDOWN
+
+        if "--all" in args:
+            sessions = self._session_manager.list_all()
+            if not sessions:
+                print("No sessions to export")
+                return
+            exporter = SessionExporter()
+            paths = exporter.export_batch(sessions, format_type)
+            print(f"Exported {len(paths)} sessions")
+        else:
+            current = self._session_manager.current()
+            if not current:
+                print("No active session")
+                return
+            exporter = SessionExporter()
+            path = exporter.export(current, format_type)
+            print(f"Exported to: {path}")
