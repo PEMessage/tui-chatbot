@@ -404,5 +404,36 @@ def main() -> None:
         print("\nBye!")
 
 
+# ╭────────────────────────────────────────────────────────────╮
+# │  向后兼容导出                                               │
+# ╰────────────────────────────────────────────────────────────╯
+
+# 导出核心事件系统（供测试文件使用）
+from .core.event_stream import EventStream
+from .core.events import AgentEvent, AgentEventType, ChatResult, EventType
+from .core.abort_controller import AbortSignal, AbortController
+
+# 旧 API 别名（供测试文件使用）
+Event = AgentEvent
+
+__all__ = [
+    "Config",
+    "Shell",
+    "main",
+    "run_command",
+    "initialize_providers",
+    "initialize_tools",
+    # 向后兼容导出
+    "EventStream",
+    "Event",  # 向后兼容别名
+    "AgentEvent",
+    "EventType",  # 向后兼容
+    "AgentEventType",
+    "ChatResult",
+    "AbortSignal",
+    "AbortController",
+]
+
+
 if __name__ == "__main__":
     main()

@@ -6,12 +6,25 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar, Union
+from typing import (
+    Any,
+    Dict,
+    Generic,
+    List,
+    Literal,
+    Optional,
+    TYPE_CHECKING,
+    TypeVar,
+    Union,
+)
 
 from pydantic import BaseModel, Field
 
 # 从 core.events 导入 AgentEventType 避免重复定义
 from ..core.events import AgentEventType
+
+if TYPE_CHECKING:
+    from ..provider.base import Provider
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -109,6 +122,9 @@ class AgentLoopConfig:
     tool_execution_mode: ToolExecutionMode = ToolExecutionMode.PARALLEL
     max_iterations: int = 10  # 防止无限循环
     api_key: Optional[str] = None
+    provider: Optional["Provider"] = None  # 直接指定 Provider 实例
+    temperature: Optional[float] = None  # 温度参数
+    max_tokens: Optional[int] = None  # 最大 token 数
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Type
 
 from .base import Provider
@@ -303,3 +304,14 @@ def register_default_providers() -> None:
     if openai_provider:
         ProviderRegistry.register("openai", openai_provider)
         ProviderRegistry.register("openai-chat", openai_provider)
+
+    # 尝试注册 Anthropic
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        from anthropic import AsyncAnthropic
+
+        from .anthropic_provider import AnthropicProvider, AnthropicProviderConfig
+
+        config = AnthropicProviderConfig()
+        client = AsyncAnthropic(api_key=anthropic_key)
+        ProviderRegistry.register("anthropic", AnthropicProvider(client, config))

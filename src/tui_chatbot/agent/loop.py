@@ -14,6 +14,7 @@ from .types import (
     AgentLoopConfig,
     AgentMessage,
     AssistantMessage,
+    TextContent,
     ToolCallContent,
     ToolCallMessage,
     ToolResultMessage,
@@ -117,7 +118,9 @@ async def agent_loop(
                         AgentEvent(
                             type=AgentEventType.TURN_END,
                             message=assistant_msg,
-                            tool_results=tool_results,
+                            tool_results=[
+                                _tool_result_to_dict(tr) for tr in tool_results
+                            ],
                         )
                     )
 
@@ -161,28 +164,192 @@ async def _stream_assistant_response(
     emit: AgentEventSink,
 ) -> AssistantMessage:
     """
-    流式获取助手响应.
+    流式获取助手响应，集成真实 Provider 调用。
 
-    这是一个简化版实现。实际项目中应该：
-    1. 调用 Provider 进行 LLM 流式请求
-    2. 处理流式返回的 tokens
-    3. 构造 AssistantMessage
+    流程:
+    1. 从 config 获取 Provider (或从 ProviderRegistry)
+    2. 将 context 转换为 Provider 需要的格式
+    3. 调用 provider.stream_chat()
+    4. 转发所有事件到 emit
+    5. 构造并返回 AssistantMessage
     """
-    # 简化版：模拟一个助手响应
-    # 实际实现应该通过 Provider 调用 LLM
+    # ═══════════════════════════════════════════════════════════════
+    # 1. 获取 Provider
+    # ═══════════════════════════════════════════════════════════════
+    provider = _get_provider(config)
 
-    assistant_msg = AssistantMessage(content=[], stop_reason="stop")
+    # ═══════════════════════════════════════════════════════════════
+    # 2. 转换消息格式
+    # ═══════════════════════════════════════════════════════════════
+    provider_messages = _convert_messages_to_provider_format(
+        context, config.system_prompt
+    )
 
-    # 发送消息开始事件
-    await emit(AgentEvent(type=AgentEventType.MESSAGE_START, message=assistant_msg))
+    # ═══════════════════════════════════════════════════════════════
+    # 3. 准备工具定义
+    # ═══════════════════════════════════════════════════════════════
+    tools_schema = None
+    if config.tool_registry:
+        tools_schema = config.tool_registry.to_openai_tools()
 
-    # 这里应该进行实际的 LLM 流式调用
-    # 并发送 MESSAGE_UPDATE 事件
+    # ═══════════════════════════════════════════════════════════════
+    # 4. 调用 Provider 获取流式响应
+    # ═══════════════════════════════════════════════════════════════
+    stream = await provider.stream_chat(
+        model=config.model,
+        messages=provider_messages,
+        tools=tools_schema,
+        signal=signal,
+    )
 
-    # 发送消息结束事件
-    await emit(AgentEvent(type=AgentEventType.MESSAGE_END, message=assistant_msg))
+    # ═══════════════════════════════════════════════════════════════
+    # 5. 处理流式事件，构建 AssistantMessage
+    # ═══════════════════════════════════════════════════════════════
+    content_parts: List[Any] = []
+    current_text = ""
+    current_tool_calls: Dict[str, Dict[str, Any]] = {}
+    finish_reason: Optional[str] = None
+    message_started = False
+
+    async for event in stream:
+        # 转发事件到 emit
+        await emit(event)
+
+        # 收集内容构建 AssistantMessage
+        if event.type == AgentEventType.MESSAGE_START:
+            message_started = True
+
+        elif event.type == AgentEventType.MESSAGE_UPDATE:
+            partial = event.partial_result or {}
+            update_type = partial.get("type")
+
+            if update_type == "content":
+                content_chunk = partial.get("content", "")
+                current_text += content_chunk
+
+            elif update_type == "reasoning":
+                # 推理内容暂不收集到 AssistantMessage，但已转发事件
+                pass
+
+        elif event.type == AgentEventType.MESSAGE_END:
+            # 从事件中获取完整消息（如果有）
+            if event.message and isinstance(event.message, AssistantMessage):
+                # 使用事件中的完整消息
+                content_parts = list(event.message.content)
+                finish_reason = event.message.stop_reason
+
+        elif event.type == AgentEventType.TURN_END:
+            # TURN_END 也包含消息信息
+            if event.message and isinstance(event.message, AssistantMessage):
+                content_parts = list(event.message.content)
+                finish_reason = event.message.stop_reason
+
+    # 如果没有从事件获取到完整消息，自己构建
+    if not content_parts:
+        # 添加文本内容
+        if current_text:
+            content_parts.append(TextContent(text=current_text))
+
+        # 添加工具调用（从流结果中获取）
+        try:
+            result = await stream.result()
+            if result and result.messages:
+                for msg in result.messages:
+                    if isinstance(msg, AssistantMessage):
+                        for content in msg.content:
+                            if isinstance(content, ToolCallContent):
+                                content_parts.append(content)
+                        if msg.stop_reason:
+                            finish_reason = msg.stop_reason
+        except Exception:
+            # 流可能已经结束或出错，忽略
+            pass
+
+    # 构建最终的 AssistantMessage
+    assistant_msg = AssistantMessage(
+        content=content_parts,
+        stop_reason=finish_reason or "stop",
+    )
 
     return assistant_msg
+
+
+def _get_provider(config: AgentLoopConfig) -> "Provider":
+    """从配置或注册表获取 Provider."""
+    # 优先使用 config 中指定的 provider
+    if config.provider:
+        return config.provider
+
+    # 回退到 ProviderRegistry
+    from ..provider.registry import ProviderRegistry
+
+    provider = ProviderRegistry.get("openai")
+    if not provider:
+        raise RuntimeError(
+            "No provider available. Please set config.provider or register a provider in ProviderRegistry."
+        )
+
+    return provider
+
+
+def _convert_messages_to_provider_format(
+    messages: List[AgentMessage], system_prompt: str
+) -> List[dict]:
+    """将 AgentMessage 转换为 Provider 接受的字典格式."""
+    result: List[dict] = []
+
+    # 添加系统提示（如果有）
+    if system_prompt:
+        result.append({"role": "system", "content": system_prompt})
+
+    for msg in messages:
+        if isinstance(msg, UserMessage):
+            result.append({"role": "user", "content": msg.content})
+
+        elif isinstance(msg, AssistantMessage):
+            # 处理助手消息（包含文本和工具调用）
+            content_parts = []
+            tool_calls = []
+
+            for content in msg.content:
+                if isinstance(content, TextContent):
+                    content_parts.append({"type": "text", "text": content.text})
+                elif isinstance(content, ToolCallContent):
+                    tool_calls.append(
+                        {
+                            "id": content.id,
+                            "type": "function",
+                            "function": {
+                                "name": content.name,
+                                "arguments": content.arguments,
+                            },
+                        }
+                    )
+
+            if tool_calls:
+                # 有工具调用时，content 为空或 null
+                result.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls,
+                    }
+                )
+            elif content_parts:
+                # 纯文本消息
+                text_content = "".join([p.get("text", "") for p in content_parts])
+                result.append({"role": "assistant", "content": text_content})
+
+        elif isinstance(msg, ToolResultMessage):
+            result.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": msg.tool_call_id,
+                    "content": msg.content,
+                }
+            )
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -442,3 +609,15 @@ async def _emit_tool_execution_end(
             is_error=is_error,
         )
     )
+
+
+def _tool_result_to_dict(result: ToolResultMessage) -> Dict[str, Any]:
+    """将 ToolResultMessage 转换为字典格式."""
+    return {
+        "role": result.role,
+        "tool_call_id": result.tool_call_id,
+        "tool_name": result.tool_name,
+        "content": result.content,
+        "is_error": result.is_error,
+        "details": result.details,
+    }

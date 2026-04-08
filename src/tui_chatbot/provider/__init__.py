@@ -39,6 +39,13 @@ from .registry import (
     register_default_providers,
 )
 
+# 延迟导入 Anthropic 以避免硬依赖
+try:
+    from .anthropic_provider import AnthropicProvider, AnthropicProviderConfig
+except ImportError:
+    AnthropicProvider = None  # type: ignore
+    AnthropicProviderConfig = None  # type: ignore
+
 __all__ = [
     # 基类
     "Provider",
@@ -50,6 +57,9 @@ __all__ = [
     # OpenAI 实现
     "OpenAIProvider",
     "OpenAIProviderConfig",
+    # Anthropic 实现
+    "AnthropicProvider",
+    "AnthropicProviderConfig",
     # 工具函数
     "create_provider_from_env",
     "register_default_providers",
