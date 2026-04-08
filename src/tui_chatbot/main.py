@@ -5,6 +5,10 @@ Design:
     - Daemon: Pure OpenAI API forwarder (stateful context)
     - Events: Logic types (reasoning_token, content_token, done)
     - Frontend: UI decisions ([Reasoning] labels, colors)
+
+Improvements (pi-mono inspired):
+    - EventStream: async for + await result() dual interface
+    - AbortController: standardized cancellation
 """
 
 import os
@@ -12,7 +16,7 @@ import sys
 import time
 import asyncio
 import shlex
-from typing import List, Dict, Optional, Any, AsyncGenerator
+from typing import List, Dict, Optional, Any, AsyncIterator, Generic, TypeVar
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -51,7 +55,149 @@ class C:
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Events (Pure Logic - No UI)                               │
+# │  AbortController (M3)                                      │
+# ╰────────────────────────────────────────────────────────────╯
+
+
+class AbortSignal:
+    """Abort signal - check aborted or wait for abort."""
+
+    def __init__(self, event: asyncio.Event, reason_ref: List[Optional[str]]):
+        self._event = event
+        self._reason_ref = reason_ref
+
+    @property
+    def aborted(self) -> bool:
+        return self._event.is_set()
+
+    @property
+    def reason(self) -> Optional[str]:
+        return self._reason_ref[0]
+
+    async def wait(self) -> None:
+        await self._event.wait()
+
+
+class AbortController:
+    """JavaScript-style abort controller with timeout support.
+
+    Usage:
+        ctrl = AbortController()
+        # Pass ctrl.signal to async operations
+        ctrl.abort("user cancelled")  # Signal abort
+    """
+
+    def __init__(self, timeout: Optional[float] = None):
+        self._event = asyncio.Event()
+        self._reason: List[Optional[str]] = [None]
+        self._timeout_handle: Optional[asyncio.TimerHandle] = None
+
+        if timeout is not None and timeout > 0:
+            self._timeout_handle = asyncio.get_event_loop().call_later(
+                timeout, self.abort, f"timeout after {timeout}s"
+            )
+
+    @property
+    def signal(self) -> AbortSignal:
+        return AbortSignal(self._event, self._reason)
+
+    def abort(self, reason: str = "aborted") -> None:
+        if not self._event.is_set():
+            self._reason[0] = reason
+            self._event.set()
+
+    def cancel_timeout(self) -> None:
+        if self._timeout_handle:
+            self._timeout_handle.cancel()
+            self._timeout_handle = None
+
+
+# ╭────────────────────────────────────────────────────────────╮
+# │  EventStream (M1) - Generic Async Iterator + Result        │
+# ╰────────────────────────────────────────────────────────────╯
+
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+class EventStream(Generic[T, R]):
+    """Dual-interface event stream: async for + await result().
+
+    Supports both iteration and promise-style result retrieval:
+        stream = daemon.chat("hello")
+        # Iterate events
+        async for event in stream:
+            print(event)
+        # Get final result
+        result = await stream.result()
+
+    Inspired by pi-mono's EventStream pattern.
+    """
+
+    def __init__(self):
+        self._queue: asyncio.Queue[T] = asyncio.Queue()
+        self._done = asyncio.Event()
+        self._result_future: asyncio.Future[R] = asyncio.Future()
+        self._error: Optional[Exception] = None
+
+    def push(self, event: T) -> None:
+        """Push event to stream. No-op if stream is done."""
+        if self._done.is_set():
+            return
+        self._queue.put_nowait(event)
+
+    def end(self, result: Optional[R] = None) -> None:
+        """End stream and set result (if provided)."""
+        if not self._done.is_set():
+            if result is not None and not self._result_future.done():
+                self._result_future.set_result(result)
+            elif not self._result_future.done():
+                # Set empty/default result
+                self._result_future.set_result(None)  # type: ignore
+            self._done.set()
+
+    def error(self, exc: Exception) -> None:
+        """End stream with error."""
+        if not self._done.is_set():
+            self._error = exc
+            if not self._result_future.done():
+                self._result_future.set_exception(exc)
+            self._done.set()
+
+    async def result(self) -> R:
+        """Get final result (promise-style)."""
+        await self._done.wait()
+        if self._error:
+            raise self._error
+        return await self._result_future
+
+    def __aiter__(self) -> AsyncIterator[T]:
+        return self
+
+    async def __anext__(self) -> T:
+        """Get next event (iteration-style)."""
+        while True:
+            # Check if done and queue empty
+            if self._done.is_set() and self._queue.empty():
+                raise StopAsyncIteration
+            # Try to get from queue without blocking indefinitely
+            try:
+                return self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                # Wait a bit for new events or done signal
+                try:
+                    await asyncio.wait_for(self._done.wait(), timeout=0.1)
+                    # Done is set, check queue one more time
+                    if self._queue.empty():
+                        raise StopAsyncIteration
+                except asyncio.TimeoutError:
+                    # Continue loop to check queue again
+                    continue
+
+
+# ╭────────────────────────────────────────────────────────────╮
+# │  Events (Pure Logic - No UI)                                 │
 # ╰────────────────────────────────────────────────────────────╯
 
 
@@ -139,6 +285,8 @@ class Daemon:
     - Context memory (msgs)
     - Trim history
     - Stats tracking
+    - EventStream (async iter + result)
+    - AbortController support
     """
 
     def __init__(self, cfg: Config):
@@ -161,71 +309,101 @@ class Daemon:
     def clear(self) -> None:
         self.msgs = [SYSTEM_MSG]
 
-    async def chat(self, text: str) -> AsyncGenerator[Event, None]:
+    def chat(
+        self, text: str, signal: Optional[AbortSignal] = None
+    ) -> EventStream[Event, str]:
         """Generate logical events from API stream.
 
-        Events are pure data:
-        - REASONING_TOKEN: raw reasoning text chunk
-        - CONTENT_TOKEN: raw content text chunk
-        - STATS: final statistics
-        - DONE: stream finished successfully
-        - ERROR: something went wrong
+        Returns EventStream supporting both:
+            async for event in stream: ...  # Iterate
+            result = await stream.result()   # Get final message
+
+        Args:
+            text: User input
+            signal: Optional abort signal for cancellation
         """
-        if not self.client:
-            yield Event(EventType.ERROR, "No API key")
-            return
+        stream = EventStream[Event, str]()
 
-        self.trim_history()
-        self.msgs.append({"role": "user", "content": text})
+        async def _stream():
+            if not self.client:
+                stream.push(Event(EventType.ERROR, "No API key"))
+                stream.end("")
+                return
 
-        stats = Stats()
-        r_buf, c_buf = "", ""
+            if signal and signal.aborted:
+                stream.push(Event(EventType.ERROR, f"Aborted: {signal.reason}"))
+                stream.end("")
+                return
 
-        try:
-            log(f"stream: model={self.model}")
-            stream = await self.client.chat.completions.create(
-                model=self.model, messages=self.msgs, stream=True
-            )
+            self.trim_history()
+            self.msgs.append({"role": "user", "content": text})
 
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if not delta:
-                    continue
+            stats = Stats()
+            r_buf, c_buf = "", ""
 
-                r = getattr(delta, "reasoning_content", None)
-                c = getattr(delta, "content", None)
+            try:
+                log(f"stream: model={self.model}")
+                api_stream = await self.client.chat.completions.create(
+                    model=self.model, messages=self.msgs, stream=True
+                )
 
-                if r:
-                    if not r_buf:  # First reasoning token
-                        stats.on_token()
-                    r_buf += r
-                    stats.tokens += len(r) // 4
-                    stats.r_tokens += len(r) // 4
-                    yield Event(EventType.REASONING_TOKEN, r)  # Pure text, no label
+                async for chunk in api_stream:
+                    # Check abort signal
+                    if signal and signal.aborted:
+                        log(f"abort: {signal.reason}")
+                        raise asyncio.CancelledError(f"Aborted: {signal.reason}")
 
-                if c:
-                    if not c_buf and not r_buf:  # First content, no reasoning before
-                        stats.on_token()
-                    c_buf += c
-                    stats.tokens += len(c) // 4
-                    stats.c_tokens += len(c) // 4
-                    yield Event(EventType.CONTENT_TOKEN, c)  # Pure text, no label
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if not delta:
+                        continue
 
-            # Complete - save to history
-            resp = c_buf or r_buf
-            if resp:
-                self.msgs.append({"role": "assistant", "content": resp})
-                yield Event(EventType.STATS, stats)
-                yield Event(EventType.DONE, None)
-            else:
-                yield Event(EventType.ERROR, "Empty response")
+                    r = getattr(delta, "reasoning_content", None)
+                    c = getattr(delta, "content", None)
 
-        except asyncio.CancelledError:
-            # Interrupted - save partial to history
-            resp = c_buf or r_buf
-            if resp:
-                self.msgs.append({"role": "assistant", "content": resp})
-            raise
+                    if r:
+                        if not r_buf:
+                            stats.on_token()
+                        r_buf += r
+                        stats.tokens += len(r) // 4
+                        stats.r_tokens += len(r) // 4
+                        stream.push(Event(EventType.REASONING_TOKEN, r))
+
+                    if c:
+                        if not c_buf and not r_buf:
+                            stats.on_token()
+                        c_buf += c
+                        stats.tokens += len(c) // 4
+                        stats.c_tokens += len(c) // 4
+                        stream.push(Event(EventType.CONTENT_TOKEN, c))
+
+                # Complete - save to history
+                resp = c_buf or r_buf
+                if resp:
+                    self.msgs.append({"role": "assistant", "content": resp})
+                    stream.push(Event(EventType.STATS, stats))
+                    stream.push(Event(EventType.DONE, None))
+                    stream.end(resp)
+                else:
+                    stream.push(Event(EventType.ERROR, "Empty response"))
+                    stream.end("")
+
+            except asyncio.CancelledError as e:
+                # Interrupted - save partial to history
+                resp = c_buf or r_buf
+                if resp:
+                    self.msgs.append({"role": "assistant", "content": resp})
+                stream.push(Event(EventType.ERROR, f"Cancelled: {e}"))
+                stream.end(resp)
+                raise
+
+            except Exception as e:
+                log(f"stream error: {e}")
+                stream.push(Event(EventType.ERROR, str(e)))
+                stream.end("")
+
+        # Start streaming in background task
+        asyncio.create_task(_stream())
+        return stream
 
     async def list_models(self) -> List[str]:
         if not self.client:
@@ -239,7 +417,7 @@ class Daemon:
 
 
 # ╭────────────────────────────────────────────────────────────╮
-# │  Commands (All Uniform)                                    │
+# │  Commands (All Uniform)                                      │
 # ╰────────────────────────────────────────────────────────────╯
 
 
@@ -280,7 +458,8 @@ class Frontend:
         }
 
         try:
-            async for ev in self.daemon.chat(text):
+            stream = self.daemon.chat(text)
+            async for ev in stream:
                 # Add two newlines on type switch to output event (except first)
                 if (
                     prev_type is not None
