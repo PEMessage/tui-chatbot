@@ -677,15 +677,33 @@ class Shell:
 # ╰────────────────────────────────────────────────────────────╯
 
 
+async def run_command(cfg: Config, line: str) -> int:
+    """Execute a single command non-interactively.
+
+    Returns exit code (0 for success, 1 for error).
+    """
+    shell = Shell(cfg)
+    cmd, argv = shell._get_cmd(line)
+
+    try:
+        await cmd.run(argv)
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Minimal TUI Chatbot - Clean Separation",
-        epilog="""
-Examples:
-  %(prog)s
-  %(prog)s --api-key sk-xxx --model gpt-4
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  %(prog)s                           # Interactive mode
+  %(prog)s -c "hello world"          # Single chat message
+  %(prog)s -c "/model gpt-4"         # Switch model
+  %(prog)s -c "/clear"               # Clear history
         """,
     )
 
@@ -695,6 +713,11 @@ Examples:
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", ""))
     parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"))
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "-c",
+        dest="command",
+        help="Execute a single command and exit (non-interactive mode)",
+    )
 
     args = parser.parse_args()
     Logger.enabled = args.debug
@@ -706,8 +729,13 @@ Examples:
         debug=args.debug,
     )
 
-    shell = Shell(cfg)
+    # Non-interactive mode: execute single command
+    if args.command:
+        exit_code = asyncio.run(run_command(cfg, args.command))
+        sys.exit(exit_code)
 
+    # Interactive mode
+    shell = Shell(cfg)
     try:
         asyncio.run(shell.run())
     except KeyboardInterrupt:
