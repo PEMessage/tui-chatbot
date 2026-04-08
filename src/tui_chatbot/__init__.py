@@ -2,6 +2,13 @@
 
 __version__ = "0.1.0"
 
+# Config 模块公共 API
+from .config import (
+    ConfigManager,
+    UserConfig,
+    get_config_manager,
+)
+
 # Agent 模块公共 API
 from .agent import (
     # Types
@@ -49,6 +56,10 @@ from .provider import (
 
 __all__ = [
     "__version__",
+    # Config
+    "ConfigManager",
+    "UserConfig",
+    "get_config_manager",
     # Agent Types
     "AgentEvent",
     "AgentEventType",

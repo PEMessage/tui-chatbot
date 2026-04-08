@@ -130,7 +130,7 @@ class AgentEvent(BaseModel):
 
     model_config = {
         "frozen": False,  # 允许修改，方便事件处理
-        "extra": "ignore",  # 允许额外字段，确保向前兼容
+        "extra": "forbid",  # 禁止额外字段，防止拼写错误
     }
 
     def __repr__(self) -> str:
@@ -178,8 +178,8 @@ class ChatResult(BaseModel):
     finish_reason: Optional[str] = Field(default=None, description="结束原因")
 
     model_config = {
-        "frozen": False,  # 允许修改，向后兼容
-        "extra": "ignore",  # 允许额外字段
+        "frozen": True,  # 不可变模型，保证数据不变性
+        "extra": "forbid",  # 禁止额外字段
     }
 
 
@@ -211,11 +211,10 @@ class TokenStats(BaseModel):
 
     @property
     def elapsed(self) -> float:
-        """总耗时 (秒)."""
-        if self.start_time is None:
+        """计算耗时，如果未结束返回 0.0."""
+        if self.start_time is None or self.end_time is None:
             return 0.0
-        end = self.end_time or time.time()
-        return max(0.0, end - self.start_time)
+        return max(0.0, self.end_time - self.start_time)
 
     @property
     def tps(self) -> float:
