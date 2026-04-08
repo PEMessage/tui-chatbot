@@ -353,15 +353,9 @@ class Daemon:
                     "stream": True,
                 }
                 if self.cfg.reasoning_effort:
-                    # Map minimal to low for OpenAI API compatibility
-                    effort = (
-                        "low"
-                        if self.cfg.reasoning_effort == "minimal"
-                        else self.cfg.reasoning_effort
-                    )
-                    create_params["reasoning_effort"] = effort
+                    create_params["reasoning_effort"] = self.cfg.reasoning_effort
                     log(
-                        f"reasoning_effort: {self.cfg.reasoning_effort} (mapped: {effort})"
+                        f"reasoning_effort: {self.cfg.reasoning_effort}"
                     )
                 api_stream = await self.client.chat.completions.create(**create_params)
 
