@@ -16,7 +16,7 @@ import sys
 import time
 import asyncio
 import shlex
-from typing import List, Dict, Optional, Any, AsyncIterator, Generic, TypeVar
+from typing import List, Dict, Optional, Any, AsyncIterator, Generic, TypeVar, Literal
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -261,6 +261,9 @@ class Stats:
 # ╰────────────────────────────────────────────────────────────╯
 
 
+ReasoningEffort = Literal["low", "medium", "high"]
+
+
 @dataclass(frozen=True)
 class Config:
     base_url: str = "https://api.openai.com/v1"
@@ -268,6 +271,7 @@ class Config:
     model: str = "gpt-3.5-turbo"
     debug: bool = False
     history: int = 10
+    reasoning_effort: Optional[ReasoningEffort] = None
 
 
 SYSTEM_MSG = {"role": "system", "content": "You are a helpful assistant."}
@@ -343,9 +347,15 @@ class Daemon:
 
             try:
                 log(f"stream: model={self.model}")
-                api_stream = await self.client.chat.completions.create(
-                    model=self.model, messages=self.msgs, stream=True
-                )
+                create_params = {
+                    "model": self.model,
+                    "messages": self.msgs,
+                    "stream": True,
+                }
+                if self.cfg.reasoning_effort:
+                    create_params["reasoning_effort"] = self.cfg.reasoning_effort
+                    log(f"reasoning_effort: {self.cfg.reasoning_effort}")
+                api_stream = await self.client.chat.completions.create(**create_params)
 
                 async for chunk in api_stream:
                     # Check abort signal
@@ -701,9 +711,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   %(prog)s                           # Interactive mode
+  %(prog)s --model o3-mini --reason-effort high
   %(prog)s -c "hello world"          # Single chat message
   %(prog)s -c "/model gpt-4"         # Switch model
-  %(prog)s -c "/clear"               # Clear history
         """,
     )
 
@@ -713,6 +723,12 @@ def main() -> None:
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY", ""))
     parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"))
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--reason-effort",
+        choices=["low", "medium", "high"],
+        default=os.getenv("REASONING_EFFORT"),
+        help="Reasoning effort for reasoning models (o1, o3, etc.). Env: REASONING_EFFORT",
+    )
     parser.add_argument(
         "-c",
         dest="command",
@@ -727,6 +743,7 @@ def main() -> None:
         api_key=args.api_key,
         model=args.model,
         debug=args.debug,
+        reasoning_effort=args.reason_effort,
     )
 
     # Non-interactive mode: execute single command
