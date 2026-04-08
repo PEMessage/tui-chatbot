@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import asyncio
+import shlex
 from typing import List, Dict, Optional, Any, AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -249,13 +250,23 @@ class Frontend:
     - When to print [Reasoning] label (first REASONING_TOKEN)
     - When to print [Assistant] label (first CONTENT_TOKEN)
     - Colors for reasoning vs content
+
+    Meta:
+        pass_mode: "raw" - entire input as single arg (for chat)
     """
+
+    # Command meta info - tells Shell how to pass input
+    META = {"pass_mode": "raw"}
 
     def __init__(self, daemon: Daemon):
         self.daemon = daemon
 
-    async def run(self, text: str) -> None:
-        """Consume events and render UI."""
+    async def run(self, argv: List[str]) -> None:
+        """Consume events and render UI.
+
+        For raw mode: argv[0] is the entire text.
+        """
+        text = argv[0] if argv else ""
         prev_type = None
         r_started = False
         c_started = False
@@ -309,14 +320,19 @@ class Frontend:
 class ModelCommand:
     """/model - List or switch models."""
 
+    META = {"pass_mode": "shlex"}
+
     def __init__(self, daemon: Daemon):
         self.daemon = daemon
 
-    async def run(self, args: str = "") -> None:
-        if args.strip():
-            self.daemon.switch_model(args.strip())
-            print(f"Switched: {args.strip()}")
+    async def run(self, argv: List[str]) -> None:
+        """Run with argv like real shell: /model or /model <name>"""
+        if len(argv) > 1:
+            # /model <name>
+            self.daemon.switch_model(argv[1])
+            print(f"Switched: {argv[1]}")
         else:
+            # /model (list)
             print("Fetching...")
             models = await self.daemon.list_models()
             if models:
@@ -333,10 +349,12 @@ class ModelCommand:
 class ClearCommand:
     """/clear - Clear history."""
 
+    META = {"pass_mode": "shlex"}
+
     def __init__(self, daemon: Daemon):
         self.daemon = daemon
 
-    async def run(self, args: str = "") -> None:
+    async def run(self, argv: List[str]) -> None:
         self.daemon.clear()
         print("Cleared")
 
@@ -344,7 +362,9 @@ class ClearCommand:
 class HelpCommand:
     """/help - Show help."""
 
-    async def run(self, args: str = "") -> None:
+    META = {"pass_mode": "shlex"}
+
+    async def run(self, argv: List[str]) -> None:
         print("""
 Commands:
   <text>          Chat with bot (default)
@@ -360,7 +380,9 @@ Press Ctrl-C to interrupt chat.
 class QuitCommand:
     """/quit - Exit."""
 
-    async def run(self, args: str = "") -> None:
+    META = {"pass_mode": "shlex"}
+
+    async def run(self, argv: List[str]) -> None:
         print("Bye!")
         sys.exit(0)
 
@@ -392,16 +414,52 @@ class Shell:
         }
 
     def _get_cmd(self, line: str) -> tuple:
-        """Parse line into (command, args)."""
-        if not line.startswith("/"):
-            return self.cmds["__default__"], line
+        """Parse line into (command, argv) using shlex like real shell.
 
-        parts = line.split(maxsplit=1)
-        name = parts[0][1:].lower()
-        args = parts[1] if len(parts) > 1 else ""
+        Returns: (command, argv_list)
 
-        cmd = self.cmds.get(name)
-        return (cmd, args) if cmd else (self.cmds["__default__"], line)
+        Pass mode is determined by command's META:
+        - "raw": entire input as single arg (for chat)
+        - "shlex": parse with shlex (for structured commands)
+        """
+        is_command = line.startswith("/")
+        cmd_name = ""
+        cmd = None
+
+        if is_command:
+            # Peek at command name without full parsing
+            parts = line.split(None, 1)
+            if parts:
+                cmd_name = parts[0][1:].lower()
+                cmd = self.cmds.get(cmd_name)
+
+        if not is_command or not cmd:
+            # Default: use Frontend (chat)
+            cmd = self.cmds["__default__"]
+            # Check command's meta for pass mode
+            pass_mode = getattr(cmd, "META", {}).get("pass_mode", "raw")
+            if pass_mode == "raw":
+                return cmd, [line]
+            else:
+                # Should not happen for default, but fallback
+                return cmd, shlex.split(line)
+
+        # Known command - check META
+        pass_mode = getattr(cmd, "META", {}).get("pass_mode", "shlex")
+
+        if pass_mode == "raw":
+            # Raw mode: remove command name, rest is single arg
+            if " " in line:
+                _, rest = line.split(None, 1)
+                return cmd, [rest]
+            return cmd, [""]
+        else:
+            # Shlex mode: full shell-like parsing
+            try:
+                argv = shlex.split(line)
+            except ValueError:
+                argv = line.split()
+            return cmd, argv
 
     async def run(self) -> None:
         """Main loop."""
@@ -418,8 +476,8 @@ class Shell:
                 if not line:
                     continue
 
-                cmd, args = self._get_cmd(line)
-                task = asyncio.create_task(cmd.run(args))
+                cmd, argv = self._get_cmd(line)
+                task = asyncio.create_task(cmd.run(argv))
                 try:
                     await task
                 except asyncio.CancelledError:
