@@ -218,6 +218,204 @@ class GetCurrentTimeTool(Tool):
 
 
 # ═══════════════════════════════════════════════════════════════
+# Calculator Tool
+# ═══════════════════════════════════════════════════════════════
+
+
+class CalculatorParams(ToolParameters):
+    """计算器参数."""
+
+    expression: str = Field(
+        description="要计算的数学表达式，例如 '2 + 2' 或 'sin(pi/2)'"
+    )
+
+
+class CalculatorTool(Tool):
+    """数学表达式计算工具.
+
+    支持基本数学运算、科学计算函数。
+    """
+
+    @property
+    def name(self) -> str:
+        return "calculate"
+
+    @property
+    def description(self) -> str:
+        return "计算数学表达式的结果，支持 +, -, *, /, **, sin, cos, log, sqrt 等运算"
+
+    @property
+    def parameters(self) -> Type[ToolParameters]:
+        return CalculatorParams
+
+    async def execute(
+        self, params: CalculatorParams, signal: Optional[Any] = None
+    ) -> ToolResult:
+        """执行计算."""
+        try:
+            # 安全计算：限制可用函数
+            allowed_names = {
+                "abs": abs,
+                "max": max,
+                "min": min,
+                "sum": sum,
+                "pow": pow,
+                "round": round,
+                "sin": lambda x: __import__("math").sin(x),
+                "cos": lambda x: __import__("math").cos(x),
+                "tan": lambda x: __import__("math").tan(x),
+                "sqrt": lambda x: __import__("math").sqrt(x),
+                "log": lambda x: __import__("math").log(x),
+                "log10": lambda x: __import__("math").log10(x),
+                "exp": lambda x: __import__("math").exp(x),
+                "pi": __import__("math").pi,
+                "e": __import__("math").e,
+            }
+
+            # 计算表达式
+            result = eval(params.expression, {"__builtins__": {}}, allowed_names)
+
+            return ToolResult(
+                content=f"{params.expression} = {result}",
+                details={"expression": params.expression, "result": result},
+            )
+        except Exception as e:
+            return ToolResult(
+                content=f"计算错误: {e}",
+                is_error=True,
+                details={"error": str(e)},
+            )
+
+
+# ═══════════════════════════════════════════════════════════════
+# File Tools
+# ═══════════════════════════════════════════════════════════════
+
+
+class ReadFileParams(ToolParameters):
+    """读取文件参数."""
+
+    file_path: str = Field(description="要读取的文件路径")
+    limit: Optional[int] = Field(default=1000, description="最大读取行数，默认 1000")
+
+
+class ReadFileTool(Tool):
+    """文件读取工具."""
+
+    @property
+    def name(self) -> str:
+        return "read_file"
+
+    @property
+    def description(self) -> str:
+        return "读取指定文件的内容，支持文本文件"
+
+    @property
+    def parameters(self) -> Type[ToolParameters]:
+        return ReadFileParams
+
+    async def execute(
+        self, params: ReadFileParams, signal: Optional[Any] = None
+    ) -> ToolResult:
+        """执行文件读取."""
+        try:
+            from pathlib import Path
+
+            path = Path(params.file_path).expanduser()
+
+            if not path.exists():
+                return ToolResult(
+                    content=f"文件不存在: {params.file_path}", is_error=True
+                )
+
+            if not path.is_file():
+                return ToolResult(
+                    content=f"路径不是文件: {params.file_path}", is_error=True
+                )
+
+            # 读取文件
+            content = path.read_text(encoding="utf-8", errors="replace")
+
+            # 限制行数
+            lines = content.split("\n")
+            if len(lines) > params.limit:
+                lines = lines[: params.limit]
+                lines.append(f"\n... (已截断，仅显示前 {params.limit} 行)")
+                content = "\n".join(lines)
+
+            return ToolResult(
+                content=content,
+                details={
+                    "file_path": str(path),
+                    "size": path.stat().st_size,
+                    "lines": len(lines),
+                },
+            )
+        except Exception as e:
+            return ToolResult(
+                content=f"读取文件失败: {e}",
+                is_error=True,
+                details={"error": str(e)},
+            )
+
+
+class WriteFileParams(ToolParameters):
+    """写入文件参数."""
+
+    file_path: str = Field(description="要写入的文件路径")
+    content: str = Field(description="文件内容")
+    append: bool = Field(default=False, description="是否追加模式，默认覆盖")
+
+
+class WriteFileTool(Tool):
+    """文件写入工具."""
+
+    @property
+    def name(self) -> str:
+        return "write_file"
+
+    @property
+    def description(self) -> str:
+        return "将内容写入指定文件，支持创建新文件或覆盖/追加现有文件"
+
+    @property
+    def parameters(self) -> Type[ToolParameters]:
+        return WriteFileParams
+
+    async def execute(
+        self, params: WriteFileParams, signal: Optional[Any] = None
+    ) -> ToolResult:
+        """执行文件写入."""
+        try:
+            from pathlib import Path
+
+            path = Path(params.file_path).expanduser()
+
+            # 确保父目录存在
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            # 写入文件
+            mode = "a" if params.append else "w"
+            with open(path, mode, encoding="utf-8") as f:
+                f.write(params.content)
+
+            return ToolResult(
+                content=f"文件已{'追加到' if params.append else '写入'}: {path}",
+                details={
+                    "file_path": str(path),
+                    "size": path.stat().st_size,
+                    "mode": "append" if params.append else "write",
+                },
+            )
+        except Exception as e:
+            return ToolResult(
+                content=f"写入文件失败: {e}",
+                is_error=True,
+                details={"error": str(e)},
+            )
+
+
+# ═══════════════════════════════════════════════════════════════
 # Factory Function
 # ═══════════════════════════════════════════════════════════════
 
@@ -226,4 +424,7 @@ def create_default_tool_registry() -> ToolRegistry:
     """创建包含默认工具的注册表."""
     registry = ToolRegistry()
     registry.register(GetCurrentTimeTool())
+    registry.register(CalculatorTool())
+    registry.register(ReadFileTool())
+    registry.register(WriteFileTool())
     return registry

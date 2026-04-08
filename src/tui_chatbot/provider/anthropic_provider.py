@@ -173,6 +173,8 @@ class AnthropicProvider(Provider):
         messages: List[dict],
         tools: Optional[List[dict]] = None,
         signal: Optional["AbortSignal"] = None,  # type: ignore  # noqa: F821
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> EventStream[AgentEvent, ChatResult]:
         """流式对话实现.
 
@@ -209,11 +211,19 @@ class AnthropicProvider(Provider):
                 # 转换消息格式
                 system_prompt, anthropic_messages = self._convert_messages(messages)
 
+                # 使用传入的参数，如果为 None 则使用配置中的值
+                effective_max_tokens = (
+                    max_tokens if max_tokens is not None else self._config.max_tokens
+                )
+                effective_temperature = (
+                    temperature if temperature is not None else self._config.temperature
+                )
+
                 # 构建请求参数
                 create_params: Dict[str, Any] = {
                     "model": model,
                     "messages": anthropic_messages,
-                    "max_tokens": self._config.max_tokens or 4096,
+                    "max_tokens": effective_max_tokens or 4096,
                     "stream": True,
                 }
 
@@ -225,8 +235,8 @@ class AnthropicProvider(Provider):
                 if anthropic_tools:
                     create_params["tools"] = anthropic_tools
 
-                if self._config.temperature is not None:
-                    create_params["temperature"] = self._config.temperature
+                if effective_temperature is not None:
+                    create_params["temperature"] = effective_temperature
 
                 if self._config.top_p is not None:
                     create_params["top_p"] = self._config.top_p

@@ -9,6 +9,8 @@ Usage:
         ProviderRegistry,
         OpenAIProvider,
         OpenAIProviderConfig,
+        OllamaProvider,
+        OllamaProviderConfig,
         LazyProvider,
         create_provider_from_env,
         register_default_providers,
@@ -30,6 +32,7 @@ Usage:
 """
 
 from .base import Provider, ProviderConfig
+from .ollama_provider import OllamaProvider, OllamaProviderConfig
 from .openai_provider import OpenAIProvider, OpenAIProviderConfig
 from .registry import (
     LazyProvider,
@@ -57,6 +60,9 @@ __all__ = [
     # OpenAI 实现
     "OpenAIProvider",
     "OpenAIProviderConfig",
+    # Ollama 实现
+    "OllamaProvider",
+    "OllamaProviderConfig",
     # Anthropic 实现
     "AnthropicProvider",
     "AnthropicProviderConfig",

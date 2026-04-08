@@ -7,9 +7,15 @@ requires-python = ">=3.11"
 dependencies = [
     "openai>=2.30.0",
     "anthropic>=0.25.0",
+    "httpx>=0.27.0",
     "python-dotenv>=1.2.2",
     "pydantic>=2.0.0",
 ]
 
 [project.scripts]
 chat = "tui_chatbot.main:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

@@ -50,6 +50,8 @@ class Provider(ABC):
         messages: List[dict],
         tools: Optional[List[dict]] = None,
         signal: Optional["AbortSignal"] = None,  # type: ignore  # noqa: F821
+        temperature: Optional[float] = None,  # 新增
+        max_tokens: Optional[int] = None,  # 新增
     ) -> "EventStream[AgentEvent, ChatResult]":
         """流式对话接口.
 
@@ -58,6 +60,8 @@ class Provider(ABC):
             messages: 消息列表
             tools: 可选的工具定义列表
             signal: 可选的取消信号
+            temperature: 温度参数，控制生成随机性
+            max_tokens: 最大生成 token 数
 
         Returns:
             EventStream[AgentEvent, ChatResult]: 流式事件流

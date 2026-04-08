@@ -87,6 +87,8 @@ class MockProvider(Provider):
         messages: List[dict],
         tools: Optional[List[dict]] = None,
         signal: Optional[Any] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> EventStream[AgentEvent, ChatResult]:
         """模拟流式对话.
 

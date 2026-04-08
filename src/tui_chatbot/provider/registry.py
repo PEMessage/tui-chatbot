@@ -297,6 +297,18 @@ def create_provider_from_env(api_type: str = "openai") -> Optional[Provider]:
     return None
 
 
+async def _check_ollama_available(base_url: str) -> bool:
+    """检查 Ollama 服务是否可用."""
+    try:
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{base_url.rstrip('/')}/api/tags", timeout=5.0)
+            return response.status_code == 200
+    except Exception:
+        return False
+
+
 def register_default_providers() -> None:
     """注册默认提供商 (从环境变量)."""
     # 尝试注册 OpenAI
@@ -315,3 +327,19 @@ def register_default_providers() -> None:
         config = AnthropicProviderConfig()
         client = AsyncAnthropic(api_key=anthropic_key)
         ProviderRegistry.register("anthropic", AnthropicProvider(client, config))
+
+    # 尝试注册 Ollama (本地模型) - 使用延迟加载
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+    async def _load_ollama():
+        from .ollama_provider import OllamaProvider, OllamaProviderConfig
+
+        config = OllamaProviderConfig(base_url=ollama_base_url)
+        return OllamaProvider(config)
+
+    # 延迟注册 OllamaProvider
+    ProviderRegistry.register_lazy(
+        "ollama",
+        _load_ollama,
+        name_hint="ollama",
+    )

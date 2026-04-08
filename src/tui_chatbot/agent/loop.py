@@ -200,6 +200,8 @@ async def _stream_assistant_response(
         messages=provider_messages,
         tools=tools_schema,
         signal=signal,
+        temperature=config.temperature,  # 传递参数
+        max_tokens=config.max_tokens,  # 传递参数
     )
 
     # ═══════════════════════════════════════════════════════════════

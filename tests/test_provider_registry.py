@@ -41,6 +41,8 @@ class MockProvider(Provider):
         messages: List[dict],
         tools: Optional[List[dict]] = None,
         signal: Optional["AbortSignal"] = None,  # type: ignore
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         """模拟流式对话."""
         from tui_chatbot.core.event_stream import EventStream

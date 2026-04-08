@@ -24,6 +24,7 @@ from tui_chatbot.main import (
     AbortSignal,
     Event,
     EventType,
+    AgentEventType,
 )
 
 
@@ -260,9 +261,11 @@ async def test_backward_compatibility():
 
     # Simulate old Daemon.chat() pattern
     def old_style_producer():
-        stream.push(Event(EventType.CONTENT_TOKEN, "Hello"))
-        stream.push(Event(EventType.CONTENT_TOKEN, " World"))
-        stream.push(Event(EventType.DONE, None))
+        stream.push(Event(type=AgentEventType.CONTENT_TOKEN, data="Hello"))
+        stream.push(Event(type=AgentEventType.CONTENT_TOKEN, data=" World"))
+        stream.push(
+            Event(type=AgentEventType.CONTENT_TOKEN, data=None)
+        )  # DONE equivalent
         stream.end("Hello World")
 
     old_style_producer()
@@ -273,7 +276,8 @@ async def test_backward_compatibility():
         events.append(ev)
 
     assert len(events) == 3, f"Expected 3 events, got {len(events)}"
-    assert events[0].type == EventType.CONTENT_TOKEN
+    # Event = AgentEvent, so type is AgentEventType
+    assert events[0].type == AgentEventType.CONTENT_TOKEN
     assert events[0].data == "Hello"
 
     print("  ✓ PASSED: Backward compatibility maintained")
