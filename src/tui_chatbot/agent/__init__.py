@@ -1,10 +1,6 @@
-"""TUI Chatbot - A modern terminal UI chatbot with streaming output and TPS statistics."""
+"""Agent 模块 - 双层循环架构和工具框架."""
 
-__version__ = "0.1.0"
-
-# Agent 模块公共 API
-from .agent import (
-    # Types
+from .types import (
     AgentEvent,
     AgentEventType,
     AgentLoopConfig,
@@ -17,7 +13,8 @@ from .agent import (
     ToolExecutionMode,
     ToolResultMessage,
     UserMessage,
-    # Tool
+)
+from .tool import (
     Tool,
     ToolParameters,
     ToolRegistry,
@@ -25,31 +22,14 @@ from .agent import (
     GetCurrentTimeTool,
     GetCurrentTimeParams,
     create_default_tool_registry,
-    # Loop
+)
+from .loop import (
     agent_loop,
     AgentEventSink,
 )
 
-# Provider 模块公共 API
-from .provider import (
-    # Base
-    Provider,
-    ProviderConfig,
-    # Registry
-    ProviderRegistry,
-    LazyProvider,
-    ProviderLoader,
-    # OpenAI
-    OpenAIProvider,
-    OpenAIProviderConfig,
-    # Utils
-    create_provider_from_env,
-    register_default_providers,
-)
-
 __all__ = [
-    "__version__",
-    # Agent Types
+    # Types
     "AgentEvent",
     "AgentEventType",
     "AgentLoopConfig",
@@ -73,17 +53,4 @@ __all__ = [
     # Loop
     "agent_loop",
     "AgentEventSink",
-    # Provider Base
-    "Provider",
-    "ProviderConfig",
-    # Provider Registry
-    "ProviderRegistry",
-    "LazyProvider",
-    "ProviderLoader",
-    # OpenAI Provider
-    "OpenAIProvider",
-    "OpenAIProviderConfig",
-    # Provider Utils
-    "create_provider_from_env",
-    "register_default_providers",
 ]

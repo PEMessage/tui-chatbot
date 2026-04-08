@@ -1,0 +1,1 @@
+--base-url https://ark.cn-beijing.volces.com/api/v3 --api-key 4f439385-1b1e-4b8f-b991-668c6d2bde4b --model doubao-seed-1-6-lite-251015
