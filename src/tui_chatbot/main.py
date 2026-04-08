@@ -261,7 +261,7 @@ class Stats:
 # ╰────────────────────────────────────────────────────────────╯
 
 
-ReasoningEffort = Literal["low", "medium", "high"]
+ReasoningEffort = Literal["minimal", "low", "medium", "high"]
 
 
 @dataclass(frozen=True)
@@ -353,8 +353,16 @@ class Daemon:
                     "stream": True,
                 }
                 if self.cfg.reasoning_effort:
-                    create_params["reasoning_effort"] = self.cfg.reasoning_effort
-                    log(f"reasoning_effort: {self.cfg.reasoning_effort}")
+                    # Map minimal to low for OpenAI API compatibility
+                    effort = (
+                        "low"
+                        if self.cfg.reasoning_effort == "minimal"
+                        else self.cfg.reasoning_effort
+                    )
+                    create_params["reasoning_effort"] = effort
+                    log(
+                        f"reasoning_effort: {self.cfg.reasoning_effort} (mapped: {effort})"
+                    )
                 api_stream = await self.client.chat.completions.create(**create_params)
 
                 async for chunk in api_stream:
@@ -725,9 +733,9 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
         "--reason-effort",
-        choices=["low", "medium", "high"],
+        choices=["minimal", "low", "medium", "high"],
         default=os.getenv("REASONING_EFFORT"),
-        help="Reasoning effort for reasoning models (o1, o3, etc.). Env: REASONING_EFFORT",
+        help="Reasoning effort for reasoning models (o1, o3, etc.). 'minimal' maps to 'low'. Env: REASONING_EFFORT",
     )
     parser.add_argument(
         "-c",
