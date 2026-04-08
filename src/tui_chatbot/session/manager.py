@@ -58,3 +58,10 @@ class SessionManager:
                 self._current_session = None
             return True
         return False
+
+    def save_current(self) -> bool:
+        """保存当前会话"""
+        if self._current_session is None:
+            return False
+        self._storage.save(self._current_session)
+        return True

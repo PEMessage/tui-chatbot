@@ -13,6 +13,7 @@ import asyncio
 from typing import List, Optional, TYPE_CHECKING, Dict, Any
 
 from .core.events import AgentEvent, AgentEventType
+from .indicator import StreamingIndicator
 
 if TYPE_CHECKING:
     from .daemon import Daemon
@@ -67,13 +68,15 @@ class Frontend:
     # 命令元信息
     META = {"pass_mode": "raw"}
 
-    def __init__(self, daemon: Daemon):
+    def __init__(self, daemon: Daemon, session_manager=None):
         """初始化 Frontend.
 
         Args:
             daemon: Daemon 实例用于对话
+            session_manager: 可选的会话管理器
         """
         self.daemon = daemon
+        self._session_manager = session_manager
 
         # 渲染状态
         self._r_started = False
@@ -84,6 +87,9 @@ class Frontend:
         # 统计
         self._stats: Dict[str, Any] = {}
 
+        # 流式指示器
+        self._indicator: Optional[StreamingIndicator] = None
+
     def _reset_state(self) -> None:
         """重置渲染状态."""
         self._r_started = False
@@ -91,6 +97,46 @@ class Frontend:
         self._tool_active = False
         self._prev_type = None
         self._stats = {}
+
+        # 确保清理遗留的指示器
+        if self._indicator:
+            self._indicator.stop()
+            self._indicator = None
+
+    def _reset_render_state(self) -> None:
+        """重置渲染状态 (用于消息生命周期)."""
+        self._r_started = False
+        self._c_started = False
+        self._tool_active = False
+        self._prev_type = None
+        self._stats = {}
+
+    def _print_header(self, event: AgentEvent) -> None:
+        """打印消息头部."""
+        # 当前实现不需要额外头部打印
+        pass
+
+    def _print_footer(self, event: AgentEvent) -> None:
+        """打印消息尾部统计."""
+        stats = getattr(event, "stats", None)
+        if stats:
+            tokens = getattr(stats, "tokens", 0)
+            tps = getattr(stats, "tps", 0.0)
+            ttft = getattr(stats, "ttft", 0.0)
+            print(f"\n[{tokens} tokens | {tps:.1f} TPS | {ttft:.2f}s TTFT]")
+
+    def _print_error(self, event: AgentEvent) -> None:
+        """打印错误信息."""
+        error = getattr(event, "error", "Unknown error")
+        print(f"\n{C.GRAY}[Error: {error}]{C.RESET}")
+
+    def _finalize_output(self) -> None:
+        """完成输出并显示统计."""
+        # 输出换行
+        print()
+        # 如果有统计信息，显示格式化后的统计
+        if self._stats:
+            print(f"{C.CYAN}{self._format_stats(self._stats)}{C.RESET}")
 
     def _need_separator(self, event_type: AgentEventType) -> bool:
         """检查事件类型切换是否需要分隔符."""
@@ -122,16 +168,42 @@ class Frontend:
 
         # 处理不同类型事件
         match event.type:
+            # 生命周期事件
+            case AgentEventType.MESSAGE_START:
+                # 启动指示器
+                if self._indicator:
+                    self._indicator.stop()
+                self._indicator = StreamingIndicator()
+                self._indicator.start()
+                self._reset_render_state()
+
             # Token 事件 (向后兼容)
             case AgentEventType.REASONING_TOKEN:
+                # 更新指示器
+                if self._indicator:
+                    self._indicator.on_token()
                 self.on_token(event.data, is_reasoning=True)
 
             case AgentEventType.CONTENT_TOKEN:
+                # 更新指示器
+                if self._indicator:
+                    self._indicator.on_token()
                 self.on_token(event.data, is_reasoning=False)
 
             # 消息更新事件
             case AgentEventType.MESSAGE_UPDATE:
+                # 更新指示器
+                if self._indicator and hasattr(event, "token"):
+                    self._indicator.on_token()
                 self._handle_message_update(event)
+
+            # 消息结束
+            case AgentEventType.MESSAGE_END:
+                # 停止指示器并显示最终统计
+                if self._indicator:
+                    self._indicator.stop()
+                    self._indicator = None
+                self._finalize_output()
 
             # 工具执行事件
             case AgentEventType.TOOL_EXECUTION_START:
@@ -150,16 +222,18 @@ class Frontend:
 
             # 错误事件
             case AgentEventType.ERROR:
+                # 错误时停止指示器
+                if self._indicator:
+                    self._indicator.stop()
+                    self._indicator = None
                 self._handle_error(event)
 
-            # 生命周期事件 (静默)
+            # 其他生命周期事件 (静默)
             case (
                 AgentEventType.AGENT_START
                 | AgentEventType.AGENT_END
                 | AgentEventType.TURN_START
                 | AgentEventType.TURN_END
-                | AgentEventType.MESSAGE_START
-                | AgentEventType.MESSAGE_END
             ):
                 pass
 
@@ -354,6 +428,10 @@ Commands:
   /export [--json] [--all]  Export session(s) to file
                             --json: Export as JSON (default: Markdown)
                             --all: Export all sessions (default: current)
+  /save                     Save current session immediately
+  /sessions                 List all sessions
+  /load <session_id>        Load a specific session
+  /config [key] [value]     View or modify configuration
   /clear                    Clear history
   /help                     This help
   /quit, /exit              Exit
@@ -469,3 +547,186 @@ class ExportCommand:
             exporter = SessionExporter()
             path = exporter.export(current, format_type)
             print(f"Exported to: {path}")
+
+
+class SaveCommand:
+    """保存命令 /save"""
+
+    META = {
+        "pass_mode": "shlex",
+        "name": "save",
+        "help": "立即保存当前会话",
+        "args": [],
+    }
+
+    def __init__(self, session_manager):
+        self._session_manager = session_manager
+
+    async def run(self, argv: List[str]) -> None:
+        """运行保存命令."""
+        current = self._session_manager.current()
+        if not current:
+            print("No active session to save")
+            return
+        success = self._session_manager.save_current()
+        if success:
+            print(f"Session '{current.metadata.title}' saved")
+        else:
+            print("Failed to save session")
+
+
+class SessionsCommand:
+    """列出所有会话 /sessions"""
+
+    META = {
+        "pass_mode": "shlex",
+        "name": "sessions",
+        "help": "列出所有会话",
+        "args": [],
+    }
+
+    def __init__(self, session_manager):
+        self._session_manager = session_manager
+
+    async def run(self, argv: List[str]) -> None:
+        """运行列出会话命令."""
+        sessions = self._session_manager.list_all()
+        current = self._session_manager.current()
+        current_id = current.metadata.id if current else None
+
+        if not sessions:
+            print("No sessions found")
+            return
+
+        print("\nSessions:")
+        for s in sessions:
+            marker = " *" if s.metadata.id == current_id else ""
+            msg_count = len(s.messages) if s.messages else 0
+            print(f"  {s.metadata.id}{marker}: {s.metadata.title} ({msg_count} msgs)")
+
+
+class LoadCommand:
+    """加载会话 /load <session_id>"""
+
+    META = {
+        "pass_mode": "shlex",
+        "name": "load",
+        "help": "加载指定会话",
+        "args": ["session_id"],
+    }
+
+    def __init__(self, session_manager):
+        self._session_manager = session_manager
+
+    async def run(self, argv: List[str]) -> None:
+        """运行加载命令."""
+        if len(argv) < 2:
+            print("Usage: /load <session_id>")
+            return
+        session_id = argv[1]
+        session = self._session_manager.load(session_id)
+        if session:
+            print(f"Loaded session: {session.metadata.title}")
+        else:
+            print(f"Session {session_id} not found")
+
+
+class ConfigCommand:
+    """配置命令 /config [key] [value]"""
+
+    META = {
+        "pass_mode": "shlex",
+        "name": "config",
+        "help": "查看或修改配置",
+        "args": ["[key]", "[value]"],
+        "examples": [
+            "/config - 显示所有配置",
+            "/config temperature - 查看温度设置",
+            "/config temperature 0.5 - 修改温度",
+        ],
+    }
+
+    # 可配置项及其说明
+    CONFIG_ITEMS = {
+        "default_model": ("默认模型名称", str),
+        "default_provider": ("默认 Provider", str),
+        "temperature": ("采样温度 (0.0-2.0)", float),
+        "max_tokens": ("最大 token 数", int),
+        "theme": ("主题名称", str),
+        "auto_save": ("自动保存配置", bool),
+    }
+
+    def __init__(self, config_manager):
+        self._config_manager = config_manager
+
+    async def run(self, argv: List[str]) -> None:
+        """运行配置命令."""
+        args = argv[1:]  # 去掉命令名
+
+        if not args:
+            self._show_all_config()
+            return
+
+        key = args[0]
+
+        if key not in self.CONFIG_ITEMS:
+            print(f"Unknown config key: {key}")
+            print(f"\nAvailable keys:")
+            for k, (desc, _) in self.CONFIG_ITEMS.items():
+                print(f"  {k:<20} - {desc}")
+            return
+
+        if len(args) < 2:
+            # 查看单项配置
+            self._show_config_item(key)
+        else:
+            # 修改配置
+            self._set_config(key, args[1])
+
+    def _show_all_config(self) -> None:
+        """显示所有配置."""
+        config = self._config_manager.get()
+
+        print(f"\n{C.BOLD}Current Configuration:{C.RESET}\n")
+
+        for key, (desc, _) in self.CONFIG_ITEMS.items():
+            value = getattr(config, key)
+            print(f"  {C.CYAN}{key:<20}{C.RESET} {value}")
+            print(f"  {'':20} {C.DIM}{desc}{C.RESET}")
+            print()
+
+        config_file = self._config_manager._config_file
+        print(f"{C.DIM}Config file: {config_file}{C.RESET}")
+
+    def _show_config_item(self, key: str) -> None:
+        """显示单项配置."""
+        config = self._config_manager.get()
+        value = getattr(config, key)
+        desc, type_ = self.CONFIG_ITEMS[key]
+
+        print(f"\n{C.BOLD}{key}{C.RESET}")
+        print(f"  Value: {C.CYAN}{value}{C.RESET}")
+        print(f"  Type:  {type_.__name__}")
+        print(f"  Desc:  {desc}")
+
+    def _set_config(self, key: str, value_str: str) -> None:
+        """设置配置值."""
+        _, type_ = self.CONFIG_ITEMS[key]
+
+        try:
+            # 类型转换
+            if type_ == bool:
+                value = value_str.lower() in ("true", "1", "yes", "on")
+            elif type_ == int:
+                value = int(value_str)
+            elif type_ == float:
+                value = float(value_str)
+            else:
+                value = value_str
+
+            self._config_manager.update(**{key: value})
+            print(f"✓ {key} = {value}")
+
+        except ValueError as e:
+            print(f"✗ Invalid value: {e}")
+            print(f"  Expected type: {type_.__name__}")

@@ -6,9 +6,11 @@ from .engine import (
     SearchResult,
     SearchMatch,
 )
+from .cache import CachedSearchEngine
 
 __all__ = [
     "MessageSearchEngine",
+    "CachedSearchEngine",
     "SearchScope",
     "SearchResult",
     "SearchMatch",

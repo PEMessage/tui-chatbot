@@ -42,6 +42,10 @@ try:
         QuitCommand,
         SearchCommand,
         ExportCommand,
+        SaveCommand,
+        SessionsCommand,
+        LoadCommand,
+        ConfigCommand,
         Logger as FrontendLogger,
         C,
     )
@@ -59,6 +63,7 @@ try:
         create_default_tool_registry,
     )
     from .session import SessionManager, SessionStorage
+    from .config.manager import ConfigManager
 except ImportError:
     # 直接运行时回退到绝对导入
     import sys
@@ -74,6 +79,10 @@ except ImportError:
         QuitCommand,
         SearchCommand,
         ExportCommand,
+        SaveCommand,
+        SessionsCommand,
+        LoadCommand,
+        ConfigCommand,
         Logger as FrontendLogger,
         C,
     )
@@ -91,6 +100,7 @@ except ImportError:
         create_default_tool_registry,
     )
     from tui_chatbot.session import SessionManager, SessionStorage
+    from tui_chatbot.config.manager import ConfigManager
 
 
 # ╭────────────────────────────────────────────────────────────╮
@@ -214,6 +224,9 @@ class Shell:
         storage = SessionStorage()
         self.session_manager = SessionManager(storage)
 
+        # 创建 ConfigManager
+        self.config_manager = ConfigManager()
+
         # 创建前端
         self.frontend = Frontend(self.daemon)
 
@@ -227,6 +240,10 @@ class Shell:
             "search": SearchCommand(self.session_manager, self.frontend),
             "s": SearchCommand(self.session_manager, self.frontend),
             "export": ExportCommand(self.session_manager),
+            "save": SaveCommand(self.session_manager),
+            "sessions": SessionsCommand(self.session_manager),
+            "load": LoadCommand(self.session_manager),
+            "config": ConfigCommand(self.config_manager),
             "help": HelpCommand(),
             "h": HelpCommand(),
             "quit": QuitCommand(),
@@ -287,7 +304,9 @@ class Shell:
         else:
             print(f"🤖 Model: {self.daemon.model}")
 
-        print("Commands: /model, /search, /export, /clear, /help, /quit")
+        print(
+            "Commands: /model, /search, /export, /save, /sessions, /load, /config, /clear, /help, /quit"
+        )
         print("Default: chat (type anything)\n")
 
         if not provider:
