@@ -12,6 +12,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from tui_chatbot.main import (
@@ -24,6 +26,7 @@ from tui_chatbot.main import (
 )
 
 
+@pytest.mark.asyncio
 async def test_daemon_chat_returns_eventstream():
     """Test: Daemon.chat() returns EventStream type."""
     print("Test 1: Daemon.chat() returns EventStream...")
@@ -45,6 +48,7 @@ async def test_daemon_chat_returns_eventstream():
     print("  ✓ PASSED: Daemon.chat() returns EventStream")
 
 
+@pytest.mark.asyncio
 async def test_daemon_chat_early_abort():
     """Test: Abort before stream starts."""
     print("Test 2: Early abort before stream...")
@@ -75,6 +79,7 @@ async def test_daemon_chat_early_abort():
     print("  ✓ PASSED: Early abort works")
 
 
+@pytest.mark.asyncio
 async def test_eventstream_concurrent_usage():
     """Test: Multiple consumers can use result()."""
     print("Test 3: Concurrent result() access...")
@@ -101,6 +106,7 @@ async def test_eventstream_concurrent_usage():
     print("  ✓ PASSED: Concurrent result() access works")
 
 
+@pytest.mark.asyncio
 async def test_eventstream_error_handling():
     """Test: Error propagation through stream."""
     print("Test 4: Error propagation...")
@@ -126,6 +132,7 @@ async def test_eventstream_error_handling():
     print("  ✓ PASSED: Error propagation works")
 
 
+@pytest.mark.asyncio
 async def test_stream_with_no_result():
     """Test: Stream ends without result."""
     print("Test 5: Stream without result...")
@@ -147,6 +154,7 @@ async def test_stream_with_no_result():
     print("  ✓ PASSED: Stream without result works")
 
 
+@pytest.mark.asyncio
 async def test_abort_during_iteration():
     """Test: Abort signal checked during iteration."""
     print("Test 6: Abort during iteration pattern...")

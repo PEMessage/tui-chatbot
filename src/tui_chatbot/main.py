@@ -93,9 +93,14 @@ class AbortController:
         self._timeout_handle: Optional[asyncio.TimerHandle] = None
 
         if timeout is not None and timeout > 0:
-            self._timeout_handle = asyncio.get_event_loop().call_later(
-                timeout, self.abort, f"timeout after {timeout}s"
-            )
+            try:
+                loop = asyncio.get_running_loop()
+                self._timeout_handle = loop.call_later(
+                    timeout, self.abort, f"timeout after {timeout}s"
+                )
+            except RuntimeError:
+                # No running loop, can't set timeout
+                pass
 
     @property
     def signal(self) -> AbortSignal:
@@ -266,12 +271,30 @@ ReasoningEffort = Literal["minimal", "low", "medium", "high"]
 
 @dataclass(frozen=True)
 class Config:
+    """Configuration for TUI Chatbot (backward compatible).
+
+    Note: New code should use tui_chatbot.config.Config directly.
+    """
+
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-3.5-turbo"
     debug: bool = False
     history: int = 10
     reasoning_effort: Optional[ReasoningEffort] = None
+
+    def to_new_config(self) -> "tui_chatbot.config.Config":
+        """Convert to new Config from config module."""
+        from .config import Config as NewConfig
+
+        return NewConfig(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            debug=self.debug,
+            history=self.history,
+            reasoning_effort=self.reasoning_effort,
+        )
 
 
 SYSTEM_MSG = {"role": "system", "content": "You are a helpful assistant."}
@@ -354,9 +377,7 @@ class Daemon:
                 }
                 if self.cfg.reasoning_effort:
                     create_params["reasoning_effort"] = self.cfg.reasoning_effort
-                    log(
-                        f"reasoning_effort: {self.cfg.reasoning_effort}"
-                    )
+                    log(f"reasoning_effort: {self.cfg.reasoning_effort}")
                 api_stream = await self.client.chat.completions.create(**create_params)
 
                 async for chunk in api_stream:
@@ -753,12 +774,28 @@ def main() -> None:
         exit_code = asyncio.run(run_command(cfg, args.command))
         sys.exit(exit_code)
 
-    # Interactive mode
-    shell = Shell(cfg)
+    # Interactive mode - use new Shell from shell module
     try:
+        from .shell import create_shell
+        from .config import Config as NewConfig
+
+        new_cfg = NewConfig(
+            base_url=cfg.base_url,
+            api_key=cfg.api_key,
+            model=cfg.model,
+            debug=cfg.debug,
+            history=cfg.history,
+            reasoning_effort=cfg.reasoning_effort,
+        )
+        shell = create_shell(new_cfg)
         asyncio.run(shell.run())
-    except KeyboardInterrupt:
-        print("\nBye!")
+    except ImportError:
+        # Fallback to legacy shell if new modules not available
+        shell = Shell(cfg)
+        try:
+            asyncio.run(shell.run())
+        except KeyboardInterrupt:
+            print("\nBye!")
 
 
 if __name__ == "__main__":
