@@ -12,7 +12,9 @@ from .models import ChatSession
 class SessionStorage:
     """会话存储管理."""
 
-    def __init__(self, storage_dir: Path):
+    def __init__(self, storage_dir: Optional[Path] = None):
+        if storage_dir is None:
+            storage_dir = Path.home() / ".config" / "tui-chatbot" / "sessions"
         self._storage_dir = storage_dir
         self._storage_dir.mkdir(parents=True, exist_ok=True)
 
