@@ -14,6 +14,20 @@ from typing import List, Optional, TYPE_CHECKING, Dict, Any
 
 from .core.events import AgentEvent, AgentEventType
 from .indicator import StreamingIndicator
+from .handlers import (
+    EventHandler,
+    MessageStartHandler,
+    MessageEndHandler,
+    ReasoningTokenHandler,
+    ContentTokenHandler,
+    MessageUpdateHandler,
+    ToolStartHandler,
+    ToolEndHandler,
+    StatsHandler,
+    ErrorHandler,
+    SilentHandler,
+    UnknownHandler,
+)
 
 if TYPE_CHECKING:
     from .daemon import Daemon
@@ -90,6 +104,21 @@ class Frontend:
         # 流式指示器
         self._indicator: Optional[StreamingIndicator] = None
 
+        # 事件处理器链 (按优先级排序)
+        self._handlers: List[EventHandler] = [
+            MessageStartHandler(),
+            MessageEndHandler(),
+            ReasoningTokenHandler(),
+            ContentTokenHandler(),
+            MessageUpdateHandler(),
+            ToolStartHandler(),
+            ToolEndHandler(),
+            StatsHandler(),
+            ErrorHandler(),
+            SilentHandler(),
+            UnknownHandler(),
+        ]
+
     def _reset_state(self) -> None:
         """重置渲染状态."""
         self._r_started = False
@@ -155,7 +184,7 @@ class Frontend:
         return False
 
     def render_event(self, event: AgentEvent) -> None:
-        """渲染单个事件.
+        """渲染单个事件 - 使用处理器链.
 
         Args:
             event: AgentEvent 事件
@@ -163,85 +192,13 @@ class Frontend:
         # 类型切换时添加分隔符
         if self._need_separator(event.type):
             print("\n")
-
         self._prev_type = event.type
 
-        # 处理不同类型事件
-        match event.type:
-            # 生命周期事件
-            case AgentEventType.MESSAGE_START:
-                # 启动指示器
-                if self._indicator:
-                    self._indicator.stop()
-                self._indicator = StreamingIndicator()
-                self._indicator.start()
-                self._reset_render_state()
-
-            # Token 事件 (向后兼容)
-            case AgentEventType.REASONING_TOKEN:
-                # 更新指示器
-                if self._indicator:
-                    self._indicator.on_token()
-                self.on_token(event.data, is_reasoning=True)
-
-            case AgentEventType.CONTENT_TOKEN:
-                # 更新指示器
-                if self._indicator:
-                    self._indicator.on_token()
-                self.on_token(event.data, is_reasoning=False)
-
-            # 消息更新事件
-            case AgentEventType.MESSAGE_UPDATE:
-                # 更新指示器
-                if self._indicator and hasattr(event, "token"):
-                    self._indicator.on_token()
-                self._handle_message_update(event)
-
-            # 消息结束
-            case AgentEventType.MESSAGE_END:
-                # 停止指示器并显示最终统计
-                if self._indicator:
-                    self._indicator.stop()
-                    self._indicator = None
-                self._finalize_output()
-                # 重置渲染状态以便下一条消息
-                self._reset_render_state()
-
-            # 工具执行事件
-            case AgentEventType.TOOL_EXECUTION_START:
-                self.on_tool_start(event.tool_name or "unknown", event.args)
-
-            case AgentEventType.TOOL_EXECUTION_END:
-                self.on_tool_end(
-                    event.tool_name or "unknown",
-                    event.result,
-                    event.is_error,
-                )
-
-            # 统计事件
-            case AgentEventType.STATS:
-                self._handle_stats(event)
-
-            # 错误事件
-            case AgentEventType.ERROR:
-                # 错误时停止指示器
-                if self._indicator:
-                    self._indicator.stop()
-                    self._indicator = None
-                self._handle_error(event)
-
-            # 其他生命周期事件 (静默)
-            case (
-                AgentEventType.AGENT_START
-                | AgentEventType.AGENT_END
-                | AgentEventType.TURN_START
-                | AgentEventType.TURN_END
-            ):
-                pass
-
-            # 其他
-            case _:
-                log(f"Unknown event type: {event.type}")
+        # 遍历处理器链
+        for handler in self._handlers:
+            if handler.can_handle(event):
+                handler.handle(event, self)
+                break
 
     def _handle_message_update(self, event: AgentEvent) -> None:
         """处理消息更新事件."""
