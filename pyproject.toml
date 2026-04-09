@@ -11,3 +11,9 @@ dependencies = [
 
 [project.scripts]
 chat = "tui_chatbot.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+]

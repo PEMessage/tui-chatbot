@@ -67,11 +67,21 @@ class Daemon:
         model_config = get_model_or_default(self.model)
 
         try:
-            # Try to get provider from registry
+            # Try to get provider from registry (may use env vars)
             self.provider = get_for_model(self.model)
         except KeyError:
-            # Try to create from environment
-            self.provider = create_provider_from_env(model_config.provider)
+            # Provider not in registry - try to create with config API key
+            if self.config.api_key:
+                from .providers.openai import OpenAIProvider, OpenAIProviderConfig
+
+                provider_config = OpenAIProviderConfig(
+                    api_key=self.config.api_key,
+                    base_url=model_config.base_url or self.config.base_url,
+                )
+                self.provider = OpenAIProvider(config=provider_config)
+            else:
+                # Try to create from environment
+                self.provider = create_provider_from_env(model_config.provider)
 
     def _ensure_provider(self) -> Optional[Provider]:
         """Ensure provider is initialized.
@@ -179,10 +189,8 @@ class Daemon:
         """
         self.model = name
 
-        # Re-initialize provider for new model
+        # Reset provider - will be lazily initialized on next chat
         self.provider = None
-        if self.config.api_key:
-            self._init_provider()
 
     def clear(self) -> None:
         """Clear conversation history (keeping system prompt)."""

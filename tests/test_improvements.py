@@ -15,6 +15,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -27,6 +29,7 @@ from tui_chatbot.main import (
 )
 
 
+@pytest.mark.asyncio
 async def test_event_stream_basic():
     """Test: Basic EventStream push and iteration."""
     print("Test 1: EventStream basic push/iteration...")
@@ -56,6 +59,7 @@ async def test_event_stream_basic():
     print("  ✓ PASSED: Basic iteration and result work")
 
 
+@pytest.mark.asyncio
 async def test_event_stream_result_first():
     """Test: Get result without iterating (promise-style)."""
     print("Test 2: EventStream promise-style result()...")
@@ -79,6 +83,7 @@ async def test_event_stream_result_first():
     print("  ✓ PASSED: Promise-style result() works")
 
 
+@pytest.mark.asyncio
 async def test_event_stream_dual_usage():
     """Test: Iterate then get result (dual interface)."""
     print("Test 3: EventStream dual usage (iterate + result)...")
@@ -111,6 +116,7 @@ async def test_event_stream_dual_usage():
     print("  ✓ PASSED: Dual usage (iterate then result) works")
 
 
+@pytest.mark.asyncio
 async def test_event_stream_empty():
     """Test: Empty stream with result."""
     print("Test 4: Empty EventStream...")
@@ -131,6 +137,7 @@ async def test_event_stream_empty():
     print("  ✓ PASSED: Empty stream works")
 
 
+@pytest.mark.asyncio
 async def test_abort_controller_basic():
     """Test: AbortController basic abort."""
     print("Test 5: AbortController basic abort...")
@@ -150,6 +157,7 @@ async def test_abort_controller_basic():
     print("  ✓ PASSED: Basic abort works")
 
 
+@pytest.mark.asyncio
 async def test_abort_controller_wait():
     """Test: AbortSignal wait() works."""
     print("Test 6: AbortSignal wait()...")
@@ -174,6 +182,7 @@ async def test_abort_controller_wait():
     print("  ✓ PASSED: AbortSignal wait() works")
 
 
+@pytest.mark.asyncio
 async def test_abort_controller_timeout():
     """Test: AbortController with timeout."""
     print("Test 7: AbortController auto timeout...")
@@ -193,6 +202,7 @@ async def test_abort_controller_timeout():
     print("  ✓ PASSED: Auto timeout works")
 
 
+@pytest.mark.asyncio
 async def test_abort_controller_cancel_timeout():
     """Test: Cancel timeout before it fires."""
     print("Test 8: AbortController cancel timeout...")
@@ -212,6 +222,7 @@ async def test_abort_controller_cancel_timeout():
     print("  ✓ PASSED: Cancel timeout works")
 
 
+@pytest.mark.asyncio
 async def test_event_stream_with_abort():
     """Test: EventStream with abort signal."""
     print("Test 9: EventStream with abort signal...")
@@ -252,6 +263,7 @@ async def test_event_stream_with_abort():
     print("  ✓ PASSED: EventStream with abort works")
 
 
+@pytest.mark.asyncio
 async def test_backward_compatibility():
     """Test: Existing async for pattern still works."""
     print("Test 10: Backward compatibility (async for)...")
@@ -279,6 +291,7 @@ async def test_backward_compatibility():
     print("  ✓ PASSED: Backward compatibility maintained")
 
 
+@pytest.mark.asyncio
 async def test_event_stream_generic_types():
     """Test: EventStream with complex generic types."""
     print("Test 11: EventStream generic type hints...")
