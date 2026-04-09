@@ -204,6 +204,8 @@ class Frontend:
                     self._indicator.stop()
                     self._indicator = None
                 self._finalize_output()
+                # 重置渲染状态以便下一条消息
+                self._reset_render_state()
 
             # 工具执行事件
             case AgentEventType.TOOL_EXECUTION_START:
@@ -363,9 +365,38 @@ class Frontend:
             # 确保最后有换行
             print()
 
+            # 同步 Daemon 消息到 SessionManager
+            self._sync_messages_to_session()
+
         except asyncio.CancelledError:
             print(f"\n{C.GRAY}[Stop]{C.RESET}")
             raise
+
+    def _sync_messages_to_session(self) -> None:
+        """将 Daemon 的消息同步到当前会话."""
+        if not self._session_manager or not self._session_manager.current():
+            return
+
+        from ..agent.types import UserMessage, AssistantMessage, TextContent
+
+        session = self._session_manager.current()
+        daemon_messages = self.daemon.messages
+
+        # 获取会话中已有的消息数量，避免重复添加
+        existing_count = len(session.messages)
+
+        # 从现有消息之后开始同步新消息
+        for msg in daemon_messages[existing_count:]:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            if role == "user" and content:
+                session.add_message(UserMessage(content=content))
+            elif role == "assistant" and content:
+                session.add_message(
+                    AssistantMessage(content=[TextContent(text=content)])
+                )
+            # 忽略 system 消息
 
 
 class ModelCommand:
@@ -440,6 +471,12 @@ Press Ctrl-C to interrupt chat.
         """)
 
 
+class QuitException(Exception):
+    """退出异常，用于通知 Shell 退出循环."""
+
+    pass
+
+
 class QuitCommand:
     """/quit, /exit - 退出."""
 
@@ -447,10 +484,8 @@ class QuitCommand:
 
     async def run(self, argv: List[str]) -> None:
         """运行退出命令."""
-        import sys
-
         print("Bye!")
-        sys.exit(0)
+        raise QuitException()
 
 
 class SearchCommand:

@@ -40,6 +40,7 @@ try:
         ClearCommand,
         HelpCommand,
         QuitCommand,
+        QuitException,
         SearchCommand,
         ExportCommand,
         SaveCommand,
@@ -77,6 +78,7 @@ except ImportError:
         ClearCommand,
         HelpCommand,
         QuitCommand,
+        QuitException,
         SearchCommand,
         ExportCommand,
         SaveCommand,
@@ -223,6 +225,8 @@ class Shell:
         # 创建 SessionManager
         storage = SessionStorage()
         self.session_manager = SessionManager(storage)
+        # 创建初始会话
+        self.session_manager.create("Default", cfg.model)
 
         # 创建 ConfigManager
         self.config_manager = ConfigManager()
@@ -312,30 +316,36 @@ class Shell:
         if not provider:
             print("⚠️  No API key. Set OPENAI_API_KEY or use --api-key")
 
-        while True:
-            try:
-                line = input(self.PROMPT).strip()
-                if not line:
-                    continue
-
-                cmd, argv = self._get_cmd(line)
-                task = asyncio.create_task(cmd.run(argv))
+        try:
+            while True:
                 try:
-                    await task
-                except asyncio.CancelledError:
-                    pass  # Ctrl-C 已处理
+                    line = input(self.PROMPT).strip()
+                    if not line:
+                        continue
 
-            except KeyboardInterrupt:
-                print(f"\n{C.GRAY}[Interrupt]{C.RESET}")
-            except EOFError:
-                print("\nBye!")
-                break
-            except Exception as e:
-                print(f"\n[Error: {e}]")
-                if FrontendLogger.enabled:
-                    import traceback
+                    cmd, argv = self._get_cmd(line)
+                    task = asyncio.create_task(cmd.run(argv))
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass  # Ctrl-C 已处理
 
-                    traceback.print_exc()
+                except KeyboardInterrupt:
+                    print(f"\n{C.GRAY}[Interrupt]{C.RESET}")
+                except EOFError:
+                    print("\nBye!")
+                    break
+                except QuitException:
+                    # /quit 命令触发退出
+                    break
+                except Exception as e:
+                    print(f"\n[Error: {e}]")
+                    if FrontendLogger.enabled:
+                        import traceback
+
+                        traceback.print_exc()
+        finally:
+            sys.exit(0)  # 确保程序退出
 
 
 # ╭────────────────────────────────────────────────────────────╮

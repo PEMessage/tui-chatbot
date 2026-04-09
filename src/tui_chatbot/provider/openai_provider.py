@@ -206,6 +206,14 @@ class OpenAIProvider(Provider):
                     if not delta:
                         continue
 
+                    # 检查是否是新消息开始 (delta.role 存在表示新消息)
+                    if getattr(delta, "role", None) and message_started:
+                        # 前一条消息已结束，重置状态以开始新消息
+                        message_started = False
+                        # 重置收集器
+                        content_parts = []
+                        reasoning_parts = []
+
                     # 第一次收到内容时发送 MESSAGE_START
                     if not message_started:
                         stream.push(AgentEvent(type=AgentEventType.MESSAGE_START))
