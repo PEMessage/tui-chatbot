@@ -192,6 +192,7 @@ class OpenAIProvider(Provider):
                 reasoning_parts: List[str] = []
                 tool_calls: List[Dict[str, Any]] = []
                 message_started = False
+                message_start_sent = False  # 确保 MESSAGE_START 只发送一次
                 finish_reason: Optional[str] = None
 
                 async for chunk in api_stream:
@@ -210,14 +211,16 @@ class OpenAIProvider(Provider):
                     if getattr(delta, "role", None) and message_started:
                         # 前一条消息已结束，重置状态以开始新消息
                         message_started = False
+                        message_start_sent = False
                         # 重置收集器
                         content_parts = []
                         reasoning_parts = []
 
                     # 第一次收到内容时发送 MESSAGE_START
-                    if not message_started:
+                    if not message_start_sent:
                         stream.push(AgentEvent(type=AgentEventType.MESSAGE_START))
                         message_started = True
+                        message_start_sent = True
 
                     # 处理 reasoning_content (o1, o3 等推理模型)
                     reasoning = getattr(delta, "reasoning_content", None)
@@ -247,6 +250,10 @@ class OpenAIProvider(Provider):
                                 },
                             )
                         )
+                    elif content == "":
+                        # 显式处理空内容字符串，确保 content 事件流完整性
+                        # 空字符串不发送更新，但记录状态
+                        pass
 
                     # 处理工具调用
                     delta_tool_calls = getattr(delta, "tool_calls", None)
@@ -276,10 +283,9 @@ class OpenAIProvider(Provider):
                 # 构建最终消息
                 message_content: List[Any] = []
 
-                # 添加文本内容
+                # 添加文本内容 (即使为空也创建 TextContent，确保消息结构完整)
                 final_content = "".join(content_parts)
-                if final_content:
-                    message_content.append(TextContent(text=final_content))
+                message_content.append(TextContent(text=final_content))
 
                 # 添加工具调用
                 for tc in tool_calls:

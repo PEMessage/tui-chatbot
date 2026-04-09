@@ -560,7 +560,7 @@ class ExportCommand:
 
     async def run(self, argv: List[str]) -> None:
         """运行导出命令."""
-        from ..export import SessionExporter, ExportFormat
+        from .export import SessionExporter, ExportFormat
 
         args = argv[1:]  # 去掉命令名
         use_json = "--json" in args
