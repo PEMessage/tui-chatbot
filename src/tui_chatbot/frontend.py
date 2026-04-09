@@ -514,7 +514,7 @@ class SearchCommand:
         keyword = args[0]
         use_regex = "--regex" in args
 
-        from ..search import MessageSearchEngine, SearchScope
+        from .search import MessageSearchEngine, SearchScope
 
         current = self._session_manager.current()
         if not current:
