@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 from .core.event_stream import EventStream
 from .core.events import AgentEvent, AgentEventType, ChatResult, TokenStats
 from .provider.registry import ProviderRegistry
+from .agent.loop import agent_loop
+from .agent.types import AgentLoopConfig, UserMessage, AgentMessage
 
 if TYPE_CHECKING:
     from .agent.tool import ToolRegistry
@@ -113,6 +115,9 @@ class Daemon:
         stream = EventStream[AgentEvent, ChatResult]()
 
         async def _stream():
+            content_parts = []
+            reasoning_parts = []
+
             try:
                 # 检查 Provider
                 provider = self._get_provider()
@@ -137,31 +142,45 @@ class Daemon:
                     stream.end(ChatResult(content="", messages=[]))
                     return
 
-                # 修剪历史并添加用户消息
+                # 修剪历史
                 self.trim_history()
-                self._messages.append({"role": "user", "content": text})
-
-                # 准备工具
-                tools = None
-                if self._tool_registry:
-                    tools = self._tool_registry.to_openai_tools()
 
                 # 获取模型
                 model = self._model or getattr(
                     provider, "default_model", "gpt-3.5-turbo"
                 )
 
-                # 发送 Agent 开始事件
-                stream.push(AgentEvent(type=AgentEventType.AGENT_START))
-                stream.push(AgentEvent(type=AgentEventType.TURN_START))
+                # 准备配置
+                system_prompt = ""
+                if self._messages and self._messages[0].get("role") == "system":
+                    system_prompt = self._messages[0].get("content", "")
 
-                # 调用 Provider 进行流式对话
-                provider_stream = await provider.stream_chat(
+                config = AgentLoopConfig(
                     model=model,
-                    messages=self._messages,
-                    tools=tools,
-                    signal=signal,
+                    system_prompt=system_prompt,
+                    tool_registry=self._tool_registry,
+                    provider=provider,
                 )
+
+                # 转换历史消息为 AgentMessage 格式
+                history: List[AgentMessage] = []
+                for msg in self._messages[1:]:  # 跳过 system 消息
+                    if msg.get("role") == "user":
+                        history.append(UserMessage(content=msg.get("content", "")))
+                    elif msg.get("role") == "assistant":
+                        from .agent.types import AssistantMessage, TextContent
+
+                        history.append(
+                            AssistantMessage(
+                                content=[TextContent(text=msg.get("content", ""))]
+                            )
+                        )
+
+                # 创建用户消息
+                user_msg = UserMessage(content=text)
+
+                # 更新历史记录（添加用户消息）
+                self._messages.append({"role": "user", "content": text})
 
                 # 统计信息
                 import time
@@ -169,12 +188,17 @@ class Daemon:
                 stats = TokenStats()
                 stats.start_time = time.time()
 
-                # 转发 Provider 事件并收集响应
-                content_parts = []
-                reasoning_parts = []
-                final_result = None
+                # 使用 agent_loop 替代直接调用 provider
+                agent_stream = await agent_loop(
+                    prompt=user_msg,
+                    history=history,
+                    config=config,
+                    signal=signal,
+                )
 
-                async for event in provider_stream:
+                # 转发 agent_loop 事件并收集响应
+                final_messages = None
+                async for event in agent_stream:
                     # 转发事件
                     stream.push(event)
 
@@ -191,15 +215,11 @@ class Daemon:
                                 stats.on_token()
                                 stats.c_tokens += len(partial.get("content", "")) // 4
 
-                    # 收集最终结果
-                    if event.type == AgentEventType.TURN_END:
-                        if hasattr(event, "message") and event.message:
-                            # 从 message 中提取内容
-                            msg = event.message
-                            if hasattr(msg, "content"):
-                                for content in msg.content:
-                                    if hasattr(content, "text"):
-                                        content_parts.append(content.text)
+                # 获取最终结果
+                try:
+                    final_messages = await agent_stream.result()
+                except Exception:
+                    pass
 
                 # 计算统计
                 stats.finalize()
@@ -207,7 +227,6 @@ class Daemon:
 
                 # 构建最终响应内容
                 final_content = "".join(content_parts) if content_parts else ""
-                final_reasoning = "".join(reasoning_parts) if reasoning_parts else ""
 
                 # 保存到历史
                 if final_content:
@@ -229,9 +248,6 @@ class Daemon:
                         },
                     )
                 )
-
-                # 发送结束事件
-                stream.push(AgentEvent(type=AgentEventType.AGENT_END))
 
                 # 构建最终结果
                 result = ChatResult(
