@@ -75,7 +75,8 @@ class ContentTokenHandler(EventHandler):
 
     def handle(self, event: AgentEvent, frontend: "Frontend") -> None:
         if frontend._indicator:
-            frontend._indicator.on_token()
+            frontend._indicator.stop()
+            frontend._indicator = None
         frontend.on_token(event.data, is_reasoning=False)
 
 
@@ -86,8 +87,15 @@ class MessageUpdateHandler(EventHandler):
         return event.type == AgentEventType.MESSAGE_UPDATE
 
     def handle(self, event: AgentEvent, frontend: "Frontend") -> None:
-        if frontend._indicator and hasattr(event, "token"):
+        partial = getattr(event, "partial_result", None)
+        is_content = partial and partial.get("type") == "content" if partial else False
+
+        if is_content and frontend._indicator:
+            frontend._indicator.stop()
+            frontend._indicator = None
+        elif frontend._indicator and hasattr(event, "token"):
             frontend._indicator.on_token()
+
         frontend._handle_message_update(event)
 
 
