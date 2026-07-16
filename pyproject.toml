@@ -1,3 +1,14 @@
+# uv-managed project — 通过 `uv sync` 安装后在 src/ 的修改即时生效
+# 依赖 hatchling 做 build-backend；tool.uv.package = true 确保 entry points 正确安装
+# without this
+# warning: Skipping installation of entry points (`project.scripts`) for package `tui-chatbot` because this project is not packaged; to install entry points, set `tool.uv.package = true` or define a `build-system`
+# [build-system]
+# requires = ["hatchling"]
+# build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
 [project]
 name = "tui-chatbot"
 version = "0.1.0"

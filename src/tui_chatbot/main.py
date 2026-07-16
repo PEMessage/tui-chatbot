@@ -122,6 +122,7 @@ class Config:
     debug: bool = False
     history: int = 10
     reasoning_effort: Optional[ReasoningEffort] = None
+    enable_tools: bool = False
 
 
 # ╭────────────────────────────────────────────────────────────╮
@@ -206,8 +207,8 @@ class Shell:
         # 初始化 Provider
         has_provider = initialize_providers(cfg)
 
-        # 初始化 Tools
-        tool_registry = initialize_tools()
+        # 初始化 Tools (默认不注册 — 部分端点不支持 function calling)
+        tool_registry = initialize_tools() if cfg.enable_tools else None
 
         # 创建 Daemon (优先使用新架构，兼容旧方式)
         if has_provider and ProviderRegistry.get("openai"):
@@ -421,6 +422,13 @@ def main() -> None:
         dest="command",
         help="Execute a single command and exit",
     )
+    parser.add_argument(
+        "--tool",
+        action="store_true",
+        dest="enable_tools",
+        default=False,
+        help="Enable built-in tools (requires endpoint support, e.g., --enable-auto-tool-choice)",
+    )
 
     args = parser.parse_args()
 
@@ -434,6 +442,7 @@ def main() -> None:
         model=args.model,
         debug=args.debug,
         reasoning_effort=args.reason_effort,
+        enable_tools=args.enable_tools,
     )
 
     # 非交互模式

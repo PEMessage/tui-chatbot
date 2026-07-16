@@ -189,7 +189,7 @@ async def _stream_assistant_response(
     # 3. 准备工具定义
     # ═══════════════════════════════════════════════════════════════
     tools_schema = None
-    if config.tool_registry:
+    if config.tool_registry and config.tool_registry.list():
         tools_schema = config.tool_registry.to_openai_tools()
 
     # ═══════════════════════════════════════════════════════════════
