@@ -6,6 +6,11 @@
 # requires = ["hatchling"]
 # build-backend = "hatchling.build"
 
+
+# 对于旧的setup.py, 会使用 pip install -e . 来安装项目
+# (-e 选项让 pip 执行“可编辑”安装，这样你就能修改包而无需重新安装)
+# See: https://dagster.io/blog/python-packages-primer-2 to compare 'setup.py' and 'pyproject.toml'
+
 [tool.uv]
 package = true
 
